@@ -74,10 +74,14 @@
     return tags;
   }
 
-  // 统一 store 接口（ADR-0003）：{ getAll, get, set }，全部同步。
+  // 统一 store 接口（ADR-0003）：{ getAll, get, set, replaceAll }，全部同步。
   //   getAll() → {[用户标识]: string[]}
   //   get(标识) → string[]（副本，无记录时为 []）
   //   set(标识, tags) → 覆盖该好友的标签；空数组视为清除，删除该键。
+  //   replaceAll(data) → 整张覆盖（导入语义的唯一入口：文件是唯一事实
+  //     来源，不在 data 里的条目一并清除）；持久化语义由后端自决。
+  // 组件模式后端另提供可选的 refreshRemote()（返回 Promise）做后台
+  // 云端合并；用户脚本后端无云端，不提供该方法。
   // 用户脚本后端：GM_getValue/GM_setValue 直接同步读写，无缓存层、无合并。
   // 存储内容损坏时按空映射处理，不让历史脏数据抛错。
   // 存储键带登录账号维度（ADR-0002）：GM 存储按浏览器隔离而非按账号，
@@ -120,7 +124,13 @@
       gmSetValue(storageKey, JSON.stringify(all));
     }
 
-    return { getAll, get, set };
+    // 整张覆盖：单次序列化写穿 GM 存储，替代逐条 set 的 O(n) 次读写。
+    // data 已由调用方结构校验（validateStoreData）。
+    function replaceAll(data) {
+      gmSetValue(storageKey, JSON.stringify(data));
+    }
+
+    return { getAll, get, set, replaceAll };
   }
 
   function tagsEqual(a, b) {
@@ -146,7 +156,7 @@
   // 缓存优先。cloud_settings 键（CLOUD_SETTINGS_KEY）按登录账号天然隔离，
   // 不加账号后缀；localStorage 缓存键按浏览器隔离，必须带登录账号
   // 维度（account 参数），否则同浏览器切换账号会读到别人的缓存。统一 store 接口同用户脚本后端（getAll/get/set，同步），
-  // 另有 loadRemote()（返回 Promise）做后台云端合并：
+  // 另提供 refreshRemote()（返回 Promise）做后台云端合并：
   //   - 启动时先用 localStorage 缓存同步渲染（无缓存则为空映射）；
   //   - 云端到达后按用户标识条目级合并：本地编辑过（本次会话 set 过）
   //     的标识优先，其余以云端为准；合并产生变更时回写云端（update +
@@ -209,6 +219,19 @@
       persist();
     }
 
+    // 整张覆盖即导入终态：置位后本会话 refreshRemote 丢弃云端合并结果，
+    // 丢弃 pending 的本地编辑（文件是唯一事实来源），随后一次性写穿
+    // 云端与缓存。空 data 也能正确写穿，旧云端标签不会在下次加载复活。
+    function replaceAll(data) {
+      imported = true;
+      edited.clear();
+      all = {};
+      for (const [identifier, tags] of Object.entries(data)) {
+        all[identifier] = tags.slice();
+      }
+      persist();
+    }
+
     // 按用户标识条目级合并云端数据；产生变更时回写并刷新缓存。
     // 返回是否产生了本地变更。
     function applyCloud(cloud) {
@@ -235,12 +258,7 @@
       return changed;
     }
 
-    // 导入即终态：置位后 loadRemote 丢弃本次会话的云端合并结果。
-    function markImported() {
-      imported = true;
-    }
-
-    function loadRemote() {
+    function refreshRemote() {
       if (imported) return Promise.resolve(false);
       let raw;
       try {
@@ -253,7 +271,7 @@
         .catch(() => false);
     }
 
-    return { getAll, get, set, loadRemote, markImported };
+    return { getAll, get, set, replaceAll, refreshRemote };
   }
 
   // 统一告警出口：带脚本前缀，console 缺失时静默。
@@ -357,16 +375,11 @@
     return result;
   }
 
-  // 以导入数据覆盖整张 store：文件是唯一事实来源，现有数据中不在文件
-  // 里的好友条目一并清除；同时置导入终态，丢弃 pending 的云端合并。
+  // 以导入数据整张覆盖 store（统一生命周期接口 replaceAll，ADR-0003）：
+  // 文件是唯一事实来源，覆盖/持久化/导入终态语义由后端在同一入口实现，
+  // 调用方不再逐条 set 拼装。
   function replaceStoreData(store, data) {
-    store.markImported?.();
-    for (const identifier of Object.keys(store.getAll())) {
-      if (!(identifier in data)) store.set(identifier, []);
-    }
-    for (const [identifier, tags] of Object.entries(data)) {
-      store.set(identifier, tags);
-    }
+    store.replaceAll(data);
   }
 
   // 唯一手写的新样式（AGENTS.md 硬性规范 3）：双栏布局。好友页的
@@ -682,9 +695,10 @@
 
     // 组件模式：云端数据后台到达后（无论是否合并出变更）刷新面板——
     // 无缓存时此刻才首次渲染出云端标签，有缓存时用云端刷新缓存渲染。
-    // loadRemote 内部已吞掉所有错误，链路不会 reject。
+    // refreshRemote 是可选能力（用户脚本后端与最小注入 store 均无），
+    // 内部吞掉所有错误，链路不会 reject。
     if (mode === MODE.COMPONENT) {
-      store.loadRemote().then(() => panel.refresh());
+      Promise.resolve(store.refreshRemote?.()).then(() => panel.refresh());
     }
 
     return { mode, page };

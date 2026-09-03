@@ -1479,9 +1479,59 @@ test("导入即终态：迟到的云端数据不得污染导入结果（文件�
     tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
     [{ tag: "导入值", count: "1" }]
   );
-  // 导入数据已推上云端（逐条 set 触发 update + save）。
+  // 导入数据已推上云端（replaceAll 整张写穿触发 update + save）。
   const lastUpdate = page.cloud.calls.update.at(-1);
   assert.deepEqual(lastUpdate[CLOUD_KEY], { puson_pp: ["导入值"] });
+});
+
+test("导入空映射覆盖为空：无缓存组件模式下也写穿云端并置终态", async () => {
+  // 无缓存且云端读取尚未完成时导入 {}：没有任何逐条 set 可拼装，
+  // 导入仍必须整张写穿云端，否则下次加载旧云端标签会重新出现。
+  const page = makeComponentPage("friends_logged.html", {
+    cloudOptions: { defer: true },
+    readTextReturn: "{}",
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.alertCalls.length, 0);
+
+  // 导入数据已写穿云端：云端映射变为空。
+  const lastUpdate = page.cloud.calls.update.at(-1);
+  assert.deepEqual(lastUpdate[CLOUD_KEY], {});
+  assert.ok(page.cloud.calls.save > 0, "导入空映射也应触发 save");
+
+  // 迟到的云端旧数据不得重新出现（导入即终态）。
+  page.cloud.deferred.resolve({ puson_pp: ["云端旧值"] });
+  await page.flush();
+  assert.deepEqual(cachedTags(page), {});
+  assert.deepEqual(tagListItems(page.root), []);
+});
+
+test("注入仅实现统一接口的 store 时组件模式正常渲染，不依赖后端专属方法", () => {
+  // store 为唯一测试 seam：注入对象只承诺统一接口（ADR-0003），
+  // 启动逻辑不得无条件调用后端专属方法（loadRemote/markImported）。
+  const { document, root } = documentFromFixture("friends_logged.html");
+  const data = { puson_pp: ["动画"] };
+  const runtime = core.initialize({
+    document,
+    location: { pathname: "/user/sai/friends" },
+    chiiApp: { cloud_settings: {} },
+    store: {
+      getAll: () => ({ ...data }),
+      get: (identifier) => data[identifier]?.slice() ?? [],
+      set: (identifier, tags) => {
+        if (tags.length === 0) delete data[identifier];
+        else data[identifier] = tags.slice();
+      },
+    },
+  });
+
+  assert.ok(runtime, "应正常启动");
+  assert.deepEqual(
+    tagListItems(root).map((item) => item.tag),
+    ["动画"]
+  );
 });
 
 // ---- 组件模式：cloud_settings 后端（#5）----
