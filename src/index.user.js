@@ -435,26 +435,25 @@
     panel.setAttribute("class", "SimpleSidePanel");
     panel.setAttribute("style", "width:100%;");
 
-    // 标题保持纯净：31px 的 chiiBtn 浮在 h2 内会越过 h2 灰线并挤开
-    // 首行 tagList 的右浮动计数。重置按钮放独立的 clearit 动作行
-    // （站内 clearfix，:after clear:both），把浮动关在行内。
+    // 标题行内放右对齐重置按钮：h2 自身带站内 clearit（:after 含
+    // clear:both 的真 clearfix），把 31px 的 rr 浮动关在 h2 内——
+    // 灰线（h2 border-bottom）画在按钮下方，浮动也不会泄漏到首行
+    // tagList 挤开右浮动计数。
     const heading = document.createElement("h2");
-    heading.textContent = "好友的标签";
-    const headingActions = document.createElement("div");
-    headingActions.setAttribute("class", "clearit");
+    heading.setAttribute("class", "clearit");
     const resetButton = createChiiButton(document, "重置", "rr");
-    headingActions.append(resetButton);
+    heading.append(document.createTextNode("好友的标签"), resetButton);
 
     const listHolder = document.createElement("div");
     const emptyTip = document.createElement("div");
     emptyTip.setAttribute("class", "tip");
     emptyTip.textContent = "暂无标签";
 
-    panel.append(heading, headingActions, listHolder, emptyTip);
+    panel.append(heading, listHolder, emptyTip);
 
     const actions = document.createElement("div");
-    const exportButton = createChiiButton(document, "导出");
-    const importButton = createChiiButton(document, "导入");
+    const exportButton = createChiiButton(document, "导出标签");
+    const importButton = createChiiButton(document, "导入标签");
     actions.append(exportButton, importButton);
 
     column.append(panel, actions);

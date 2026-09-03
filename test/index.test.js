@@ -1114,7 +1114,7 @@ test("面板插入 .columns 内 columnUserSingle 之后的新右栏，仅双栏�
   );
 });
 
-test("标题「好友的标签」纯净；重置按钮在紧随其后的 clearit 动作行内右对齐", () => {
+test("标题行内右对齐 chiiBtn 重置（h2 自身 clearit 含住浮动，灰线在按钮下方）；下方 chiiBtn 导出/导入", () => {
   const page = makeUserscriptPage("friends_logged.html", {
     pathname: "/user/sai/friends",
   });
@@ -1122,23 +1122,15 @@ test("标题「好友的标签」纯净；重置按钮在紧随其后的 clearit
   const panel = tagPanel(page.root);
   const children = elementChildren(panel);
   const heading = children.find((node) => node.tagName === "h2");
-  assert.equal(heading.children.at(-1), "好友的标签");
-  // 标题内不放浮动按钮：31px 的 chiiBtn 会越过 h2 灰线并挤开首行计数。
-  assert.deepEqual(
-    elementChildren(heading).filter((node) => typeof node !== "string"),
-    [],
-    "h2 内不应有浮动按钮"
-  );
-
-  // 重置按钮放在紧随 h2 的独立动作行里，行本身是站内 clearit（含
-  // :after clear:both 的真 clearfix），把 rr 浮动关在行内。
-  const rowIndex = children.indexOf(heading) + 1;
-  const actionRow = children[rowIndex];
-  assert.ok(actionRow, "h2 之后应有动作行");
-  assert.ok(hasClass(actionRow, "clearit"), "动作行应复用站内 clearit clearfix");
-  const reset = elementChildren(actionRow).find(
+  // 重置按钮在标题行内（紧随标题文本）右对齐；h2 自身带站内 clearit，
+  // :after clear:both 把 31px 浮动关在 h2 内：灰线画在按钮下方，
+  // 浮动也不再挤开首行 tagList 的右浮动计数。
+  assert.ok(hasClass(heading, "clearit"), "h2 应带站内 clearit clearfix");
+  assert.equal(heading.children[0], "好友的标签");
+  const reset = elementChildren(heading).find(
     (node) => typeof node !== "string"
   );
+  assert.ok(reset, "h2 行内应有重置按钮");
   assert.equal(reset.tagName, "a");
   assert.deepEqual(
     (reset.attributes.class ?? "").split(/\s+/).sort(),
@@ -1146,8 +1138,8 @@ test("标题「好友的标签」纯净；重置按钮在紧随其后的 clearit
   );
   assert.equal(reset.textContent, "重置");
 
-  assert.equal(chiiButtonByLabel(page.root, "导出") !== null, true);
-  assert.equal(chiiButtonByLabel(page.root, "导入") !== null, true);
+  assert.equal(chiiButtonByLabel(page.root, "导出标签") !== null, true);
+  assert.equal(chiiButtonByLabel(page.root, "导入标签") !== null, true);
 });
 
 test("面板渲染标签与计数、按数量降序、计数右对齐结构复刻站内 tagList", () => {
@@ -1199,8 +1191,8 @@ test("空状态显示 tip「暂无标签」而非空白，标题与按钮常驻"
   assert.notEqual(tip.style.display, "none");
   assert.ok(tagPanel(page.root));
   assert.ok(chiiButtonByLabel(page.root, "重置"));
-  assert.ok(chiiButtonByLabel(page.root, "导出"));
-  assert.ok(chiiButtonByLabel(page.root, "导入"));
+  assert.ok(chiiButtonByLabel(page.root, "导出标签"));
+  assert.ok(chiiButtonByLabel(page.root, "导入标签"));
 });
 
 // ---- 标签栏面板：筛选 ----
@@ -1310,7 +1302,7 @@ test("导出：confirm 确认后下载原始 store 的 pretty JSON", async () =>
     storeData: data,
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导出"));
+  clickNode(chiiButtonByLabel(page.root, "导出标签"));
   assert.equal(page.confirmCalls.length, 1);
   assert.equal(page.downloads.length, 1);
   const { filename, text } = page.downloads[0];
@@ -1325,7 +1317,7 @@ test("导出：confirm 取消后不下载且无任何变更", () => {
     storeData: { puson_pp: ["动画"] },
     confirmReturn: false,
   });
-  clickNode(chiiButtonByLabel(page.root, "导出"));
+  clickNode(chiiButtonByLabel(page.root, "导出标签"));
   assert.equal(page.downloads.length, 0);
   assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
 });
@@ -1337,7 +1329,7 @@ test("导入：合法 JSON 覆盖现有数据并刷新面板", async () => {
     readTextReturn: JSON.stringify({ puson_pp: ["新"], "614349": ["y"] }),
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(page.alertCalls.length, 0);
@@ -1378,7 +1370,7 @@ test("导入：文件读取失败时 alert 提示且数据与面板不变（区�
   });
   assert.ok(runtime);
 
-  clickNode(chiiButtonByLabel(root, "导入"));
+  clickNode(chiiButtonByLabel(root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(alertCalls.length, 1);
@@ -1397,7 +1389,7 @@ test("导入：confirm 取消时不读取文件、数据与面板不变", async 
     readTextReturn: JSON.stringify({ evil: [] }),
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(page.readTextCalls.length, 0);
@@ -1412,7 +1404,7 @@ test("导入：文件选择取消时数据与面板不变", async () => {
     readTextReturn: null,
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(page.alertCalls.length, 0);
@@ -1434,7 +1426,7 @@ test("导入：非法结构被拒绝、alert 提示、现有数据与面板不�
     });
     const panelBefore = tagListItems(page.root).map((i) => i.tag);
 
-    clickNode(chiiButtonByLabel(page.root, "导入"));
+    clickNode(chiiButtonByLabel(page.root, "导入标签"));
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(page.alertCalls.length, 1, `应 alert：${text}`);
@@ -1456,7 +1448,7 @@ test("导入后选中的筛选标签不存在时自动清除筛选", async () =>
   clickNode(tagListItems(page.root)[0].link);
   assert.deepEqual(visibleHrefs(page.root), ["/user/puson_pp"]);
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
@@ -1471,7 +1463,7 @@ test("导入即终态：迟到的云端数据不得污染导入结果（文件�
     readTextReturn: JSON.stringify({ puson_pp: ["导入值"] }),
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(page.alertCalls.length, 0);
 
@@ -1496,7 +1488,7 @@ test("导入空映射覆盖为空：无缓存组件模式下也写穿云端并�
     readTextReturn: "{}",
   });
 
-  clickNode(chiiButtonByLabel(page.root, "导入"));
+  clickNode(chiiButtonByLabel(page.root, "导入标签"));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(page.alertCalls.length, 0);
 
