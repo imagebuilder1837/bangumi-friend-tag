@@ -256,17 +256,22 @@
     return { getAll, get, set, loadRemote, markImported };
   }
 
-  // 降级告警：GM API 不可用时（如未授予 @grant）告警后静默退出，
-  // 不提供不可持久化的内存后端（规格只定义 GM/cloud 两种后端）。
-  function warnStorageFallback() {
+  // 统一告警出口：带脚本前缀，console 缺失时静默。
+  function warn(message) {
     if (typeof console !== "undefined") {
-      console.warn?.(
-        "bangumi-friend-tag: GM_getValue/GM_setValue 不可用，脚本不会运行。",
-      );
+      console.warn?.(`bangumi-friend-tag: ${message}`);
     }
   }
 
-  // 从 /user/{标识} 形式的链接解析用户标识；无法解析时返回 null。
+  // 降级告警：GM API 不可用时（如未授予 @grant）告警后静默退出，
+  // 不提供不可持久化的内存后端（规格只定义 GM/cloud 两种后端）。
+  function warnStorageFallback() {
+    warn("GM_getValue/GM_setValue 不可用，脚本不会运行。");
+  }
+
+  // 从 /user/{标识} 形式的链接解析用户标识；无法解析（含百分号解码
+  // 失败）时返回 null，与 parsePageType 的策略一致：宁可跳过该条目，
+  // 也不让同一好友因编码差异在不同页面落到不同的存储键。
   // 允许绝对 URL（页面右上角 idBadgerNeue 的头像链接带站内绝对地址）。
   function parseUserHref(href) {
     const match = /^(?:[a-z][a-z0-9+.-]*:\/\/[^/]+)?\/user\/([^/?#]+)/.exec(
@@ -276,7 +281,7 @@
     try {
       return decodeURIComponent(match[1]);
     } catch {
-      return match[1];
+      return null;
     }
   }
 
@@ -294,11 +299,7 @@
   // 登录账号标识缺失（未登录或页头结构变动）时告警后静默退出：
   // 好友标签数据必须按登录账号隔离（ADR-0002），无账号宁可不可用。
   function warnAccountMissing() {
-    if (typeof console !== "undefined") {
-      console.warn?.(
-        "bangumi-friend-tag: 未能从页面识别登录账号，脚本不会运行。",
-      );
-    }
+    warn("未能从页面识别登录账号，脚本不会运行。");
   }
 
   function createTagLink({ document, store, dialog, identifier, onEdit }) {
