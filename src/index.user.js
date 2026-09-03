@@ -161,7 +161,9 @@
   // 组件模式后端（ADR-0001/0003）：cloud_settings 单键 + localStorage
   // 缓存优先。cloud_settings 键（CLOUD_SETTINGS_KEY）按登录账号天然隔离，
   // 不加账号后缀；localStorage 缓存键按浏览器隔离，必须带登录账号
-  // 维度（account 参数），否则同浏览器切换账号会读到别人的缓存。统一 store 接口同用户脚本后端（getAll/get/set，同步），
+  // 维度（account 参数），否则同浏览器切换账号会读到别人的缓存。
+  // 统一 store 接口同用户脚本后端（getAll/get/set/replaceAll，同步），
+  // 另提供可选的 refreshRemote() 做后台云端合并。
   // 另提供 refreshRemote()（返回 Promise）做后台云端合并：
   //   - 启动时先用 localStorage 缓存同步渲染（无缓存则为空映射）；
   //   - 云端到达后按用户标识条目级合并：本地编辑过（本次会话 set 过）
@@ -431,8 +433,6 @@
 
     const panel = document.createElement("div");
     panel.setAttribute("class", "SimpleSidePanel");
-    panel.setAttribute("style", "width:190px;");
-
     panel.setAttribute("style", "width:100%;");
 
     // 标题保持纯净：31px 的 chiiBtn 浮在 h2 内会越过 h2 灰线并挤开
