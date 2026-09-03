@@ -30,19 +30,14 @@
   // 标识为数字或字符串（见 CONTEXT.md「用户标识」）。
   const PAGE_PATH_PATTERN = /^\/user\/([^/]+)\/(friends|rev_friends)\/?$/;
 
-  // GM 存储键：整张 {用户标识: 标签数组} 映射序列化后存于单键（ADR-0001/0002）。
-  // 注意：GM 存储按浏览器而非登录账号隔离，与 ADR-0002「按登录账号全局
-  // 一份」存在已知偏差（组件模式由 cloud_settings 天然按账号隔离）；
-  // 用户脚本模式下同浏览器切换账号会看到同一份数据，待后续工单处置。
-  const STORAGE_KEY = "friendTags";
-
   // 组件模式（ADR-0001，适用范围经 ADR-0003 收窄）：整张映射存放在
-  // cloud_settings 的单个键中（规避「无法删除最后一个 key」的已知坑），
-  // 并以结构一致的映射缓存到 localStorage 供下次启动缓存优先渲染。
+  // cloud_settings 的单个键中（规避「无法删除最后一个 key」的已知坑）。
+  // cloud_settings 按登录账号天然隔离，无需账号后缀；localStorage 缓存
+  // 键则必须带登录账号维度（见 createComponentStore 的 account 参数），
+  // 否则同浏览器切换账号会读到别人的缓存。
   // cloud_settings 的值会被字符串化，但字符串数组可安全往返；数字键会被
   // 转成字符串键——用户标识本来就是字符串，无影响。
   const CLOUD_SETTINGS_KEY = "friendTags";
-  const LOCAL_CACHE_KEY = "bangumi-friend-tag:friendTags";
 
   // 运行环境判定（ADR-0003）：存在 GM_info → 用户脚本模式；否则存在
   // chiiApp.cloud_settings → 组件模式；两者皆无 → 返回 null，调用方静默退出。
@@ -85,9 +80,14 @@
   //   set(标识, tags) → 覆盖该好友的标签；空数组视为清除，删除该键。
   // 用户脚本后端：GM_getValue/GM_setValue 直接同步读写，无缓存层、无合并。
   // 存储内容损坏时按空映射处理，不让历史脏数据抛错。
-  function createUserScriptStore({ gmGetValue, gmSetValue }) {
+  // 存储键带登录账号维度（ADR-0002）：GM 存储按浏览器隔离而非按账号，
+  // 固定键会让同浏览器切换账号共享同一份数据。旧无账号键的数据不迁移
+  // （见 ADR 决策记录），从新键重新开始。
+  function createUserScriptStore({ gmGetValue, gmSetValue, account }) {
+    const storageKey = `friendTags:${account}`;
+
     function readAll() {
-      const raw = gmGetValue(STORAGE_KEY);
+      const raw = gmGetValue(storageKey);
       if (typeof raw !== "string") return {};
       try {
         const parsed = JSON.parse(raw);
@@ -117,7 +117,7 @@
       const all = readAll();
       if (tags.length === 0) delete all[identifier];
       else all[identifier] = tags;
-      gmSetValue(STORAGE_KEY, JSON.stringify(all));
+      gmSetValue(storageKey, JSON.stringify(all));
     }
 
     return { getAll, get, set };
@@ -143,7 +143,9 @@
   }
 
   // 组件模式后端（ADR-0001/0003）：cloud_settings 单键 + localStorage
-  // 缓存优先。统一 store 接口同用户脚本后端（getAll/get/set，同步），
+  // 缓存优先。cloud_settings 键（CLOUD_SETTINGS_KEY）按登录账号天然隔离，
+  // 不加账号后缀；localStorage 缓存键按浏览器隔离，必须带登录账号
+  // 维度（account 参数），否则同浏览器切换账号会读到别人的缓存。统一 store 接口同用户脚本后端（getAll/get/set，同步），
   // 另有 loadRemote()（返回 Promise）做后台云端合并：
   //   - 启动时先用 localStorage 缓存同步渲染（无缓存则为空映射）；
   //   - 云端到达后按用户标识条目级合并：本地编辑过（本次会话 set 过）
@@ -152,20 +154,28 @@
   //   - 云端读取抛错/结构非法/键不存在时跳过合并不回写，避免误清本地。
   // save() 无回调（平台已知坑），保存结果无从感知，不依赖确认；所有
   // cloud_settings 调用均吞错，持久化失败不影响页面内使用（还有缓存）。
-  function createComponentStore({ cloudSettings, localStorage: storage }) {
+  function createComponentStore({
+    cloudSettings,
+    localStorage: storage,
+    account,
+  }) {
+    const localCacheKey = `bangumi-friend-tag:friendTags:${account}`;
     // 缓存损坏或 storage 不可用时按无缓存处理（空映射，等云端）。
     let all = (() => {
       try {
-        return parseTagMap(storage?.getItem?.(LOCAL_CACHE_KEY)) ?? {};
+        return parseTagMap(storage?.getItem?.(localCacheKey)) ?? {};
       } catch {
         return {};
       }
     })();
     const edited = new Set();
+    // 导入即终态（#4 用户故事 14）：导入后本会话丢弃 pending 的云端
+    // 合并结果，文件是唯一事实来源；导入数据经 set() 已推上云端。
+    let imported = false;
 
     function writeCache() {
       try {
-        storage?.setItem?.(LOCAL_CACHE_KEY, JSON.stringify(all));
+        storage?.setItem?.(localCacheKey, JSON.stringify(all));
       } catch {
         // 缓存写入失败（如隐私模式）：页面内仍可用，下次启动等云端。
       }
@@ -200,7 +210,7 @@
     }
 
     // 按用户标识条目级合并云端数据；产生变更时回写并刷新缓存。
-    // 返回是否产生了变更。
+    // 返回是否产生了本地变更。
     function applyCloud(cloud) {
       if (!cloud) return false;
       let changed = false;
@@ -218,11 +228,20 @@
           changed = true;
         }
       }
-      if (changed) persist();
+      // ADR-0001 后果条款：合并期间存在本地编辑时，合并后必须回写云端，
+      // 否则云端读取窗口之前的编辑会被云端的陈旧值在下次刷新时覆盖
+      //（edited 条目在合并中被跳过，不回写就没人把本地值推上去）。
+      if (changed || edited.size > 0) persist();
       return changed;
     }
 
+    // 导入即终态：置位后 loadRemote 丢弃本次会话的云端合并结果。
+    function markImported() {
+      imported = true;
+    }
+
     function loadRemote() {
+      if (imported) return Promise.resolve(false);
       let raw;
       try {
         raw = cloudSettings.get?.(CLOUD_SETTINGS_KEY);
@@ -230,40 +249,55 @@
         return Promise.resolve(false);
       }
       return Promise.resolve(raw)
-        .then((value) => applyCloud(parseTagMap(value)))
+        .then((value) => (imported ? false : applyCloud(parseTagMap(value))))
         .catch(() => false);
     }
 
-    return { getAll, get, set, loadRemote };
+    return { getAll, get, set, loadRemote, markImported };
   }
 
-  // 降级后端：GM API 不可用时（如未授予 @grant）的内存后端，保证页面内
-  // 可用但不持久化；选择初始化时告警而非静默丢失数据。
-  function createMemoryStore() {
-    const data = new Map();
-    return {
-      getAll() {
-        return Object.fromEntries(data);
-      },
-      get(identifier) {
-        const tags = data.get(identifier);
-        return tags ? tags.slice() : [];
-      },
-      set(identifier, tags) {
-        if (tags.length === 0) data.delete(identifier);
-        else data.set(identifier, tags.slice());
-      },
-    };
+  // 降级告警：GM API 不可用时（如未授予 @grant）告警后静默退出，
+  // 不提供不可持久化的内存后端（规格只定义 GM/cloud 两种后端）。
+  function warnStorageFallback() {
+    if (typeof console !== "undefined") {
+      console.warn?.(
+        "bangumi-friend-tag: GM_getValue/GM_setValue 不可用，脚本不会运行。",
+      );
+    }
   }
 
   // 从 /user/{标识} 形式的链接解析用户标识；无法解析时返回 null。
+  // 允许绝对 URL（页面右上角 idBadgerNeue 的头像链接带站内绝对地址）。
   function parseUserHref(href) {
-    const match = /^\/user\/([^/?#]+)/.exec(href ?? "");
+    const match = /^(?:[a-z][a-z0-9+.-]*:\/\/[^/]+)?\/user\/([^/?#]+)/.exec(
+      href ?? "",
+    );
     if (!match) return null;
     try {
       return decodeURIComponent(match[1]);
     } catch {
       return match[1];
+    }
+  }
+
+  // 从页面右上角 idBadgerNeue 的头像链接识别登录账号的用户标识。
+  // 未登录时该容器内是 guest 登录/注册链接，取不到头像，返回 null。
+  // 注意：不能用 #headerProfile 的 .headerAvatar——那是页面所有者的
+  // 头像（subjectNav），在他人的好友页上会误把页主当登录账号。
+  function detectAccountIdentifier(document) {
+    const badge = document.querySelector(".idBadgerNeue");
+    return parseUserHref(
+      badge?.querySelector("a.avatar")?.getAttribute("href"),
+    );
+  }
+
+  // 登录账号标识缺失（未登录或页头结构变动）时告警后静默退出：
+  // 好友标签数据必须按登录账号隔离（ADR-0002），无账号宁可不可用。
+  function warnAccountMissing() {
+    if (typeof console !== "undefined") {
+      console.warn?.(
+        "bangumi-friend-tag: 未能从页面识别登录账号，脚本不会运行。",
+      );
     }
   }
 
@@ -323,8 +357,9 @@
   }
 
   // 以导入数据覆盖整张 store：文件是唯一事实来源，现有数据中不在文件
-  // 里的好友条目一并清除。
+  // 里的好友条目一并清除；同时置导入终态，丢弃 pending 的云端合并。
   function replaceStoreData(store, data) {
+    store.markImported?.();
     for (const identifier of Object.keys(store.getAll())) {
       if (!(identifier in data)) store.set(identifier, []);
     }
@@ -561,6 +596,8 @@
   // 依赖注入入口。deps（均可省略，浏览器中缺省回退到全局对象）：
   //   document    — 页面 Document；
   //   location    — 页面 Location；
+  //   store       — 直接注入的 store（唯一测试 seam）；提供时跳过后端
+  //                 构造与登录账号识别，由调用方对存储语义全权负责；
   //   dialog      — { prompt, confirm, alert } 页面对话框桩，缺省用全局
   //                 prompt/confirm/alert；
   //   files       — { download, readText } 文件桥桩，缺省用浏览器
@@ -571,8 +608,12 @@
   //   localStorage — 组件模式的本地缓存后端，缺省用全局 localStorage。
   // 返回运行环境描述符 { mode, page }；应静默退出时返回 null，且保证不
   // 读取、不修改页面 DOM。
-  // 用户脚本模式：GM 后端同步读写（ADR-0003）。组件模式：cloud_settings
-  // 后端，缓存优先渲染 + 后台云端合并（ADR-0001），云端到达后刷新面板。
+  // 两种模式都从页面右上角 idBadgerNeue 头像识别登录账号，取不到时告警
+  // 后静默退出（标签数据按登录账号隔离，ADR-0002，无账号宁可不可用）。
+  // 用户脚本模式：GM 后端同步读写（ADR-0003），键带登录账号后缀。
+  // 组件模式：cloud_settings 后端，缓存优先渲染 + 后台云端合并
+  // （ADR-0001），云端到达后刷新面板；GM API 缺失时告警后静默退出，
+  // 不提供不可持久化的内存后端。
   function initialize(deps = {}) {
     const mode = detectMode(deps);
     if (!mode) return null;
@@ -582,23 +623,32 @@
 
     if (!deps.document) return { mode, page };
 
-    let store;
-    if (mode === MODE.COMPONENT) {
-      store = createComponentStore({
-        cloudSettings: deps.chiiApp.cloud_settings,
-        localStorage: deps.localStorage ?? null,
-      });
-    } else if (
-      typeof deps.gmGetValue === "function" &&
-      typeof deps.gmSetValue === "function"
-    ) {
-      store = createUserScriptStore({
-        gmGetValue: deps.gmGetValue,
-        gmSetValue: deps.gmSetValue,
-      });
-    } else {
-      warnStorageFallback();
-      store = createMemoryStore();
+    let store = deps.store;
+    if (!store) {
+      const account = detectAccountIdentifier(deps.document);
+      if (!account) {
+        warnAccountMissing();
+        return null;
+      }
+      if (mode === MODE.COMPONENT) {
+        store = createComponentStore({
+          cloudSettings: deps.chiiApp.cloud_settings,
+          localStorage: deps.localStorage ?? null,
+          account,
+        });
+      } else if (
+        typeof deps.gmGetValue === "function" &&
+        typeof deps.gmSetValue === "function"
+      ) {
+        store = createUserScriptStore({
+          gmGetValue: deps.gmGetValue,
+          gmSetValue: deps.gmSetValue,
+          account,
+        });
+      } else {
+        warnStorageFallback();
+        return null;
+      }
     }
 
     const entries = collectFriendEntries(deps.document);
@@ -715,14 +765,7 @@
     };
   }
 
-  const core = {
-    initialize,
-    normalizeTags,
-    createUserScriptStore,
-    createComponentStore,
-    CLOUD_SETTINGS_KEY,
-    LOCAL_CACHE_KEY,
-  };
+  const core = { initialize };
 
   // 仅在 CommonJS 且无 document 的环境（即 node --test）导出 core；
   // 浏览器中跳过导出分支并自动初始化。

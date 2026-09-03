@@ -342,6 +342,23 @@ function visibleHrefs(root) {
     .sort();
 }
 
+// 存储键常量（独立真值，硬编码在测试里，不依赖源码导出）。
+const CLOUD_KEY = "friendTags";
+const cacheKeyFor = (account) => `bangumi-friend-tag:friendTags:${account}`;
+
+// 把登录账号头像注入页头右上角 idBadgerNeue（替换 guest 登录/注册链接）。
+// 登录态 fixture 自带头像，但为了确定性统一重写为相对地址。
+function logInAs(root, identifier) {
+  const badge = findElement(root, (node) => hasClass(node, "idBadgerNeue"));
+  assert.ok(badge, "fixture 应有 idBadgerNeue 容器");
+  const avatar = parseFragment(
+    `<a class="avatar" href="/user/${identifier}"><span class="avatarNeue avatarSize32"></span></a>`,
+    () => {},
+  ).children[0];
+  badge.children = [avatar];
+  avatar.parent = badge;
+}
+
 // 构造一次完整的用户脚本模式初始化：GM 存储由内存字符串模拟，
 // prompt/confirm/alert 桩可编程返回值并记录调用，files 桩记录下载并
 // 提供可编程的文件读取结果。
@@ -349,14 +366,17 @@ function makeUserscriptPage(
   fixtureName,
   {
     pathname,
+    account = "imagebuilder183",
     storeData = {},
+    rawStore,
     promptReturn,
     confirmReturn = true,
     readTextReturn,
   } = {}
 ) {
   const { document, root, mutations } = documentFromFixture(fixtureName);
-  let serialized = JSON.stringify(storeData);
+  logInAs(root, account);
+  let serialized = rawStore ?? JSON.stringify(storeData);
   const gmGetValue = () => serialized;
   const gmSetValue = (key, value) => {
     serialized = value;
@@ -401,6 +421,8 @@ function makeUserscriptPage(
     runtime,
     root,
     mutations,
+    account,
+    dialog,
     promptCalls,
     confirmCalls,
     alertCalls,
@@ -450,7 +472,7 @@ function makeCloudSettingsStub(
   const calls = { update: [], save: 0, get: 0 };
   const data = {};
   if (initialTags !== undefined) {
-    data[core.CLOUD_SETTINGS_KEY] = initialTags;
+    data[CLOUD_KEY] = initialTags;
   }
   let deferred = null;
   let lastDeferred = null;
@@ -466,7 +488,7 @@ function makeCloudSettingsStub(
       calls.get += 1;
       if (getThrows) throw new Error("cloud read failed");
       if (deferred) return deferred.promise;
-      if (rawValue !== undefined && key === core.CLOUD_SETTINGS_KEY) {
+      if (rawValue !== undefined && key === CLOUD_KEY) {
         return rawValue;
       }
       return data[key];
@@ -506,25 +528,51 @@ function makeCloudSettingsStub(
 // （原始字符串，用于构造损坏缓存）预置 localStorage 缓存。
 function makeComponentPage(
   fixtureName,
-  { pathname, cloudData, cacheData, rawCache, cloudOptions } = {}
+  {
+    pathname,
+    account = "imagebuilder183",
+    cloudData,
+    cacheData,
+    rawCache,
+    cloudOptions,
+    readTextReturn,
+    confirmReturn = true,
+  } = {}
 ) {
   const { document, root } = documentFromFixture(fixtureName);
+  logInAs(root, account);
   const cacheEntries =
     rawCache !== undefined
-      ? { [core.LOCAL_CACHE_KEY]: rawCache }
+      ? { [cacheKeyFor(account)]: rawCache }
       : cacheData === undefined
         ? {}
-        : { [core.LOCAL_CACHE_KEY]: JSON.stringify(cacheData) };
+        : { [cacheKeyFor(account)]: JSON.stringify(cacheData) };
   const storage = makeLocalStorageStub(cacheEntries);
   const cloud = makeCloudSettingsStub(cloudData, cloudOptions);
+  const confirmCalls = [];
+  const alertCalls = [];
+  const readTextCalls = [];
+  const downloads = [];
   const dialog = {
     prompt() {
       return null;
     },
-    confirm() {
-      return true;
+    confirm(message) {
+      confirmCalls.push(message);
+      return confirmReturn;
     },
-    alert() {},
+    alert(message) {
+      alertCalls.push(message);
+    },
+  };
+  const files = {
+    download(filename, text) {
+      downloads.push({ filename, text });
+    },
+    readText() {
+      readTextCalls.push(true);
+      return Promise.resolve(readTextReturn ?? null);
+    },
   };
   const runtime = core.initialize({
     document,
@@ -532,13 +580,26 @@ function makeComponentPage(
     chiiApp: { cloud_settings: cloud.stub },
     localStorage: storage,
     dialog,
+    files,
   });
   const flush = () => new Promise((resolve) => setImmediate(resolve));
-  return { runtime, root, storage, cloud, flush, dialog };
+  return {
+    runtime,
+    root,
+    account,
+    storage,
+    cloud,
+    flush,
+    dialog,
+    confirmCalls,
+    alertCalls,
+    readTextCalls,
+    downloads,
+  };
 }
 
-function cachedTags(storage) {
-  const raw = storage.getItem(core.LOCAL_CACHE_KEY);
+function cachedTags(page) {
+  const raw = page.storage.getItem(cacheKeyFor(page.account));
   return raw === null ? null : JSON.parse(raw);
 }
 
@@ -553,29 +614,20 @@ function tagLinkFor(root, href) {
 
 // ---- core API 与运行环境判定 ----
 
-test("core 暴露 initialize、normalizeTags、两种 store 工厂与存储键常量", () => {
-  assert.deepEqual(Object.keys(core).sort(), [
-    "CLOUD_SETTINGS_KEY",
-    "LOCAL_CACHE_KEY",
-    "createComponentStore",
-    "createUserScriptStore",
-    "initialize",
-    "normalizeTags",
-  ]);
+test("core 仅暴露 initialize：测试统一经最高入口驱动，不直接测试内部函数", () => {
+  assert.deepEqual(Object.keys(core), ["initialize"]);
   assert.equal(typeof core.initialize, "function");
-  assert.equal(typeof core.normalizeTags, "function");
-  assert.equal(typeof core.createUserScriptStore, "function");
-  assert.equal(typeof core.createComponentStore, "function");
-  assert.equal(typeof core.CLOUD_SETTINGS_KEY, "string");
-  assert.equal(typeof core.LOCAL_CACHE_KEY, "string");
 });
 
 test("存在 GM_info 时判定为用户脚本模式", () => {
-  const { document } = documentFromFixture("friends.html");
+  const { document, root } = documentFromFixture("friends.html");
+  logInAs(root, "sai");
   const runtime = core.initialize({
     document,
     location: { pathname: "/user/sai/friends" },
     gmInfo: { scriptMetaStr: "" },
+    gmGetValue: () => "{}",
+    gmSetValue: () => {},
   });
   assert.deepEqual(runtime, {
     mode: "userscript",
@@ -599,11 +651,14 @@ test("存在 chiiApp.cloud_settings 时判定为组件模式并安装 tag 按钮
 });
 
 test("GM_info 与 chiiApp 同时存在时用户脚本模式优先（ADR-0003）", () => {
-  const { document } = documentFromFixture("friends.html");
+  const { document, root } = documentFromFixture("friends.html");
+  logInAs(root, "sai");
   const runtime = core.initialize({
     document,
     location: { pathname: "/user/sai/friends" },
     gmInfo: { scriptMetaStr: "" },
+    gmGetValue: () => "{}",
+    gmSetValue: () => {},
     chiiApp: cloudSettingsStub(),
   });
   assert.equal(runtime?.mode, "userscript");
@@ -642,12 +697,15 @@ test("非好友页静默退出且不修改页面 DOM", () => {
 });
 
 test("页面类型解析覆盖好友页、反向好友页、尾斜杠与百分号编码标识", () => {
-  const { document } = documentFromFixture("friends.html");
+  const { document, root } = documentFromFixture("friends.html");
+  logInAs(root, "sai");
   const initializeWith = (pathname) =>
     core.initialize({
       document,
       location: { pathname },
       gmInfo: { scriptMetaStr: "" },
+      gmGetValue: () => "{}",
+      gmSetValue: () => {},
     })?.page;
 
   assert.deepEqual(initializeWith("/user/2/friends"), {
@@ -666,74 +724,99 @@ test("页面类型解析覆盖好友页、反向好友页、尾斜杠与百分�
   assert.equal(initializeWith("/"), undefined);
 });
 
-// ---- 标签规范化 ----
+// ---- 标签规范化（经 prompt 闭环观察）----
 
-test("normalizeTags：按连续空白切分并丢弃空串", () => {
-  assert.deepEqual(core.normalizeTags("a  b\tc\n d"), ["a", "b", "c", "d"]);
-  assert.deepEqual(core.normalizeTags("  x  "), ["x"]);
-  assert.deepEqual(core.normalizeTags("   "), []);
-  assert.deepEqual(core.normalizeTags(""), []);
+test("prompt 输入规范化：连续空白切分、去重且区分大小写、全空清除", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["旧"] },
+    promptReturn: "  动画  监督  动画  A a Ab a A  ",
+  });
+
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  assert.deepEqual(page.readStore()["puson_pp"], [
+    "动画",
+    "监督",
+    "A",
+    "a",
+    "Ab",
+  ]);
+
+  // 全空视为清除该好友所有标签。
+  page.dialog.prompt = () => "   ";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  assert.deepEqual(page.readStore(), {});
 });
 
-test("normalizeTags：区分大小写去重，保留首次输入形式", () => {
-  assert.deepEqual(core.normalizeTags("A a Ab a A"), ["A", "a", "Ab"]);
+test("用户脚本模式：GM 存储内容损坏时按空数据处理且不抛错", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    rawStore: "not-json{",
+  });
+
+  assert.deepEqual(tagListItems(page.root), []);
+  page.dialog.prompt = () => "动画";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
 });
 
-test("normalizeTags：非字符串输入视为空", () => {
-  assert.deepEqual(core.normalizeTags(null), []);
-  assert.deepEqual(core.normalizeTags(undefined), []);
-  assert.deepEqual(core.normalizeTags(42), []);
-});
+// ---- deps.store 注入（唯一测试 seam）----
 
-// ---- store ----
-
-test("GM store：保存后重新读取数据一致；新实例读到同一份数据", () => {
-  let serialized = "";
-  const gmGetValue = () => serialized;
-  const gmSetValue = (key, value) => {
-    serialized = value;
-  };
-  const store = core.createUserScriptStore({ gmGetValue, gmSetValue });
-
-  store.set("puson_pp", ["动画", "监督"]);
-  assert.deepEqual(store.get("puson_pp"), ["动画", "监督"]);
-
-  // 模拟新页面加载：全新 store 实例从 GM 存储读取。
-  const reloaded = core.createUserScriptStore({ gmGetValue, gmSetValue });
-  assert.deepEqual(reloaded.get("puson_pp"), ["动画", "监督"]);
-});
-
-test("GM store：全部为空视为清除该好友所有标签", () => {
-  let serialized = JSON.stringify({ sai: ["旧"] });
-  const store = core.createUserScriptStore({
-    gmGetValue: () => serialized,
-    gmSetValue: (key, value) => {
-      serialized = value;
+test("deps.store 注入：initialize 用注入的 store 驱动按钮与面板", () => {
+  const { document, root } = documentFromFixture("friends_logged.html");
+  const data = { puson_pp: ["动画"] };
+  const setCalls = [];
+  const injectedStore = {
+    getAll: () => ({ ...data }),
+    get: (identifier) => data[identifier] ?? [],
+    set(identifier, tags) {
+      setCalls.push({ identifier, tags });
+      if (tags.length === 0) delete data[identifier];
+      else data[identifier] = tags;
     },
+  };
+
+  const runtime = core.initialize({
+    document,
+    location: { pathname: "/user/sai/friends" },
+    gmInfo: { scriptMetaStr: "" },
+    store: injectedStore,
+    dialog: { prompt: () => "注入", confirm: () => true, alert: () => {} },
   });
 
-  store.set("sai", []);
-  assert.deepEqual(store.get("sai"), []);
-  assert.deepEqual(JSON.parse(serialized), {});
+  assert.deepEqual(runtime, {
+    mode: "userscript",
+    page: { section: "friends", ownerIdentifier: "sai" },
+  });
+  assert.ok(tagPanel(root));
+  assert.deepEqual(tagListItems(root).map(({ tag, count }) => ({ tag, count })), [
+    { tag: "动画", count: "1" },
+  ]);
+
+  clickTag(tagLinks(root)[0]);
+  assert.deepEqual(setCalls[0].tags, ["注入"]);
+  assert.deepEqual(tagListItems(root).map((item) => item.tag), ["注入"]);
 });
 
-test("GM store：get 返回副本，外部修改不影响存储", () => {
-  const serialized = JSON.stringify({ sai: ["a"] });
-  const store = core.createUserScriptStore({
-    gmGetValue: () => serialized,
-    gmSetValue: () => {},
-  });
-  const tags = store.get("sai");
-  tags.push("b");
-  assert.deepEqual(store.get("sai"), ["a"]);
-});
-
-test("GM store：存储内容损坏时回退为空映射而非抛错", () => {
-  const store = core.createUserScriptStore({
-    gmGetValue: () => "not-json{",
-    gmSetValue: () => {},
-  });
-  assert.deepEqual(store.get("sai"), []);
+test("GM_info 存在但 GM API 缺失时告警并静默退出（不创建内存后端）", () => {
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warns.push(message);
+  let runtime;
+  try {
+    const { document, root } = documentFromFixture("friends_logged.html");
+    runtime = core.initialize({
+      document,
+      location: { pathname: "/user/sai/friends" },
+      gmInfo: { scriptMetaStr: "" },
+    });
+    assert.equal(runtime, null);
+    assert.equal(tagLinks(root).length, 0);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /GM_getValue/);
 });
 
 // ---- tag 按钮：四类页面形态 ----
@@ -825,7 +908,8 @@ test("他人反向好友页：同样在无操作行时创建独立 tag 按钮", 
 
 test("好友项缺失头像链接（无法确定用户标识）时跳过且不抛错", () => {
   const root = parseFragment(
-    '<ul id="memberUserList"><li class="user"><div class="userContainer"><strong>无头像</strong></div></li></ul>',
+    '<div class="idBadgerNeue"><a class="avatar" href="/user/me"><span></span></a></div>' +
+      '<ul id="memberUserList"><li class="user"><div class="userContainer"><strong>无头像</strong></div></li></ul>',
     () => {}
   );
   const { document } = documentFromTree(root);
@@ -835,9 +919,96 @@ test("好友项缺失头像链接（无法确定用户标识）时跳过且不�
       document,
       location: { pathname: "/user/sai/friends" },
       gmInfo: { scriptMetaStr: "" },
+      gmGetValue: () => "{}",
+      gmSetValue: () => {},
     })
   );
   assert.equal(tagLinks(root).length, 0);
+});
+
+// ---- 登录账号隔离（ADR-0002）----
+
+test("登录账号取自页头右上角 idBadgerNeue 头像，而非页面所有者的 headerAvatar", () => {
+  // 登录态 fixture 的 headerProfile 头像是页面所有者无关紧要：登录身份
+  // 只由 idBadgerNeue 决定。注入登录账号 2 后，存储键应带 2。
+  const { document, root } = documentFromFixture("friends_logged.html");
+  logInAs(root, "2");
+  const writes = {};
+  const runtime = core.initialize({
+    document,
+    location: { pathname: "/user/sai/friends" },
+    gmInfo: { scriptMetaStr: "" },
+    gmGetValue: (key) => writes[key],
+    gmSetValue: (key, value) => {
+      writes[key] = value;
+    },
+    dialog: { prompt: () => "t", confirm: () => true, alert: () => {} },
+  });
+  assert.ok(runtime);
+  clickTag(tagLinkFor(root, "/user/puson_pp"));
+  assert.deepEqual(JSON.parse(writes["friendTags:2"]), { puson_pp: ["t"] });
+  assert.equal("friendTags" in writes, false, "不得写入无账号的旧键");
+});
+
+test("同一浏览器切换登录账号：GM 键按账号隔离，互不可见", () => {
+  // 账号 alice 打标签后，账号 bob 以全新存储启动，看不到 alice 的数据。
+  const a = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    account: "alice",
+    promptReturn: "alice标签",
+  });
+  clickTag(tagLinkFor(a.root, "/user/puson_pp"));
+  assert.deepEqual(a.readStore(), { puson_pp: ["alice标签"] });
+
+  const b = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    account: "bob",
+  });
+  assert.deepEqual(tagListItems(b.root), [], "bob 不应看到 alice 的标签");
+  assert.deepEqual(b.readStore(), {});
+});
+
+test("未登录（取不到登录账号）时告警后静默退出，不修改页面 DOM", () => {
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warns.push(message);
+  let runtime;
+  try {
+    // 登录态 fixture 但抹掉 idBadgerNeue 中的头像，模拟未登录。
+    const { document, root } = documentFromFixture("friends_logged.html");
+    const badge = findElement(root, (node) => hasClass(node, "idBadgerNeue"));
+    badge.children = [];
+    runtime = core.initialize({
+      document,
+      location: { pathname: "/user/sai/friends" },
+      gmInfo: { scriptMetaStr: "" },
+      gmGetValue: () => "{}",
+      gmSetValue: () => {},
+    });
+    assert.equal(runtime, null);
+    assert.equal(tagLinks(root).length, 0);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /登录账号/);
+});
+
+test("组件模式：localStorage 缓存键带登录账号后缀，cloud_settings 键不变", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["动画"] },
+  });
+  await page.flush();
+
+  assert.deepEqual(cachedTags(page), { puson_pp: ["动画"] });
+  assert.ok(page.storage.map.has(cacheKeyFor("imagebuilder183")));
+  assert.equal(
+    page.storage.map.has("bangumi-friend-tag:friendTags"),
+    false,
+    "不得写入无账号的旧缓存键"
+  );
+  // cloud_settings 天然按账号隔离，键保持单键不变。
+  assert.deepEqual(Object.keys(page.cloud.data), [CLOUD_KEY]);
 });
 
 // ---- 点击闭环：prompt 预填 + 按用户标识保存 ----
@@ -849,13 +1020,7 @@ test("点击 tag 弹出 prompt 预填现有标签；确认后按用户标识保�
     promptReturn: "  动画  监督  动画  ",
   });
 
-  const container = containerWithAvatarHref(page.root, "/user/puson_pp");
-  const tagLink = tagLinks(page.root).find((link) =>
-    container.children.some(function has(node) {
-      return node === link || (node.children && node.children.some(has));
-    })
-  );
-  clickTag(tagLink);
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
 
   assert.equal(page.promptCalls.length, 1);
   assert.match(page.promptCalls[0].message, /标签/);
@@ -863,7 +1028,7 @@ test("点击 tag 弹出 prompt 预填现有标签；确认后按用户标识保�
   assert.deepEqual(page.readStore()["puson_pp"], ["动画", "监督"]);
 
   // 再次点击时 prompt 预填的是刚保存的标签。
-  clickTag(tagLink);
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
   assert.equal(page.promptCalls.length, 2);
   assert.equal(page.promptCalls[1].defaultValue, "动画 监督");
 });
@@ -875,13 +1040,7 @@ test("点击 tag：标识取自头像链接，数字与百分号编码标识均�
   });
 
   for (const href of ["/user/614349", "/user/madoka_kaname"]) {
-    const container = containerWithAvatarHref(page.root, href);
-    const tagLink = tagLinks(page.root).find((link) =>
-      container.children.some(function has(node) {
-        return node === link || (node.children && node.children.some(has));
-      })
-    );
-    clickTag(tagLink);
+    clickTag(tagLinkFor(page.root, href));
   }
   const store = page.readStore();
   assert.deepEqual(store["614349"], ["t"]);
@@ -914,13 +1073,7 @@ test("同一好友在 friends 与 rev_friends 页面共享同一套标签（ADR-
     pathname: "/user/sai/rev_friends",
     storeData: JSON.parse(saved),
   });
-  const container = containerWithAvatarHref(revPage.root, "/user/puson_pp");
-  const tagLink = tagLinks(revPage.root).find((link) =>
-    container.children.some(function has(node) {
-      return node === link || (node.children && node.children.some(has));
-    })
-  );
-  clickTag(tagLink);
+  clickTag(tagLinkFor(revPage.root, "/user/puson_pp"));
   assert.equal(revPage.promptCalls[0].defaultValue, "共同好友");
 });
 
@@ -1103,12 +1256,7 @@ test("tag 按钮编辑后面板计数刷新，且当前筛选立即重新应用"
     storeData: { puson_pp: ["动画"] },
     promptReturn: "动画",
   });
-  const container = containerWithAvatarHref(page.root, "/user/614349");
-  const tagLink = tagLinks(page.root).find((link) =>
-    container.children.some(function has(node) {
-      return node === link || (node.children && node.children.some(has));
-    })
-  );
+  const tagLink = tagLinkFor(page.root, "/user/614349");
 
   clickNode(tagListItems(page.root)[0].link);
   assert.deepEqual(visibleHrefs(page.root), ["/user/puson_pp"]);
@@ -1288,6 +1436,31 @@ test("导入后选中的筛选标签不存在时自动清除筛选", async () =>
   assert.deepEqual(tagListItems(page.root).map((i) => i.link.getAttribute("class")), ["l"]);
 });
 
+test("导入即终态：迟到的云端数据不得污染导入结果（文件是唯一事实来源）", async () => {
+  // 云端读取 pending 时导入 {c}；云端随后返回独有键 {b}：
+  // 最终必须是 {c}，而不是 {c, b}。
+  const page = makeComponentPage("friends_logged.html", {
+    cloudOptions: { defer: true },
+    readTextReturn: JSON.stringify({ puson_pp: ["导入值"] }),
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.alertCalls.length, 0);
+
+  page.cloud.deferred.resolve({ "614349": ["云端独有"] });
+  await page.flush();
+
+  assert.deepEqual(cachedTags(page), { puson_pp: ["导入值"] });
+  assert.deepEqual(
+    tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
+    [{ tag: "导入值", count: "1" }]
+  );
+  // 导入数据已推上云端（逐条 set 触发 update + save）。
+  const lastUpdate = page.cloud.calls.update.at(-1);
+  assert.deepEqual(lastUpdate[CLOUD_KEY], { puson_pp: ["导入值"] });
+});
+
 // ---- 组件模式：cloud_settings 后端（#5）----
 
 test("组件模式首次加载：无缓存时等待云端数据渲染，云端到达后出现标签", async () => {
@@ -1328,8 +1501,8 @@ test("组件模式首次加载：有缓存时先按缓存渲染，云端到达�
   );
   // 合并产生变更 → 回写云端 + 缓存同步为合并结果。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[core.CLOUD_SETTINGS_KEY], { puson_pp: ["新"] });
-  assert.deepEqual(cachedTags(page.storage), { puson_pp: ["新"] });
+  assert.deepEqual(lastUpdate[CLOUD_KEY], { puson_pp: ["新"] });
+  assert.deepEqual(cachedTags(page), { puson_pp: ["新"] });
 });
 
 test("合并方向：本地编辑过的用户标识保留本地值，其余以云端为准（ADR-0001）", async () => {
@@ -1349,7 +1522,7 @@ test("合并方向：本地编辑过的用户标识保留本地值，其余以�
   });
   await page.flush();
 
-  const merged = cachedTags(page.storage);
+  const merged = cachedTags(page);
   assert.deepEqual(merged, {
     puson_pp: ["本地新标签"],
     "614349": ["云端保留"],
@@ -1357,8 +1530,29 @@ test("合并方向：本地编辑过的用户标识保留本地值，其余以�
   });
   // 合并产生变更 → 回写云端（update + save）。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[core.CLOUD_SETTINGS_KEY], merged);
+  assert.deepEqual(lastUpdate[CLOUD_KEY], merged);
   assert.ok(page.cloud.calls.save >= 2, "编辑与合并回写各触发一次 save");
+});
+
+test("合并期间存在本地编辑时，即使云端只含 edited 条目也回写云端（ADR-0001）", async () => {
+  // 云端读取发起于编辑前，返回的只有 edited 条目的陈旧值：合并本身
+  // 无变更，但必须把本地新值推上云，否则下次刷新会被陈旧值覆盖。
+  const page = makeComponentPage("friends_logged.html", {
+    cacheData: { puson_pp: ["旧"] },
+    cloudOptions: { defer: true },
+  });
+
+  page.dialog.prompt = () => "本地新值";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  const savesAfterEdit = page.cloud.calls.save;
+
+  page.cloud.deferred.resolve({ puson_pp: ["云端陈旧值"] });
+  await page.flush();
+
+  // 本地保留编辑值，且合并后回写云端。
+  assert.deepEqual(cachedTags(page), { puson_pp: ["本地新值"] });
+  assert.ok(page.cloud.calls.save > savesAfterEdit, "合并后应有第二次 save");
+  assert.deepEqual(page.cloud.data[CLOUD_KEY], { puson_pp: ["本地新值"] });
 });
 
 test("编辑标签后：update + save 写入云端，localStorage 缓存与云端数据结构一致", async () => {
@@ -1369,12 +1563,12 @@ test("编辑标签后：update + save 写入云端，localStorage 缓存与云�
   clickTag(tagLinkFor(page.root, "/user/puson_pp"));
 
   assert.deepEqual(page.cloud.calls.update, [
-    { [core.CLOUD_SETTINGS_KEY]: { puson_pp: ["动画", "监督"] } },
+    { [CLOUD_KEY]: { puson_pp: ["动画", "监督"] } },
   ]);
   assert.equal(page.cloud.calls.save, 1);
   assert.deepEqual(
-    cachedTags(page.storage),
-    page.cloud.data[core.CLOUD_SETTINGS_KEY]
+    cachedTags(page),
+    page.cloud.data[CLOUD_KEY]
   );
 });
 
@@ -1388,8 +1582,8 @@ test("编辑为空时清除该好友全部标签：云端映射中删除该键",
   clickTag(tagLinkFor(page.root, "/user/puson_pp"));
   await page.flush();
 
-  assert.deepEqual(page.cloud.data[core.CLOUD_SETTINGS_KEY], {});
-  assert.deepEqual(cachedTags(page.storage), {});
+  assert.deepEqual(page.cloud.data[CLOUD_KEY], {});
+  assert.deepEqual(cachedTags(page), {});
   assert.deepEqual(tagListItems(page.root), []);
 });
 
@@ -1406,7 +1600,7 @@ test("云端读取抛错时跳过合并：本地数据保留、不回写、不�
   );
   assert.equal(page.cloud.calls.update.length, 0);
   assert.equal(page.cloud.calls.save, 0);
-  assert.deepEqual(cachedTags(page.storage), { puson_pp: ["旧"] });
+  assert.deepEqual(cachedTags(page), { puson_pp: ["旧"] });
 });
 
 test("云端数据结构非法时跳过合并不回写", async () => {
@@ -1465,10 +1659,14 @@ test("浏览器环境自动初始化：无 GM_info 与 chiiApp 时静默退出�
 
 test("浏览器环境自动初始化：GM_info 存在时为每个好友创建 tag 按钮", () => {
   const { document, root, mutations } = documentFromFixture("friends.html");
+  logInAs(root, "sai");
   vm.runInNewContext(fs.readFileSync(SOURCE_PATH, "utf8"), {
     document,
     location: { pathname: "/user/sai/friends" },
     GM_info: { scriptName: "test" },
+    GM_getValue: () => "{}",
+    GM_setValue: () => {},
+    console,
   });
   const containers = userContainers(root);
   assert.equal(tagLinks(root).length, containers.length);
