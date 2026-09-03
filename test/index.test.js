@@ -1114,7 +1114,7 @@ test("面板插入 .columns 内 columnUserSingle 之后的新右栏，仅双栏�
   );
 });
 
-test("标题行内右对齐 chiiBtn 重置（h2 自身 clearit 含住浮动，灰线在按钮下方）；下方 chiiBtn 导出/导入", () => {
+test("标题行内右对齐 chiiBtn 重置，底对齐贴住灰线；下方 chiiBtn 导出/导入", () => {
   const page = makeUserscriptPage("friends_logged.html", {
     pathname: "/user/sai/friends",
   });
@@ -1122,10 +1122,15 @@ test("标题行内右对齐 chiiBtn 重置（h2 自身 clearit 含住浮动，�
   const panel = tagPanel(page.root);
   const children = elementChildren(panel);
   const heading = children.find((node) => node.tagName === "h2");
-  // 重置按钮在标题行内（紧随标题文本）右对齐；h2 自身带站内 clearit，
-  // :after clear:both 把 31px 浮动关在 h2 内：灰线画在按钮下方，
-  // 浮动也不再挤开首行 tagList 的右浮动计数。
-  assert.ok(hasClass(heading, "clearit"), "h2 应带站内 clearit clearfix");
+  // 重置按钮在标题行内右对齐。31px 浮动会把 h2 撑高而文本行盒仍停
+  // 在顶部（调 padding 会连浮动一起平移，间隙不变），因此 h2 用底
+  // 对齐 flex：文本与按钮都贴住 border-bottom，且不耦合按钮尺寸。
+  // 浮动被 flex 忽略，故不需（也不能带）clearit：其 :after 会变成
+  // 可见的 flex item。
+  assert.equal(
+    heading.attributes.style,
+    "display:flex;align-items:flex-end;justify-content:space-between;"
+  );
   assert.equal(heading.children[0], "好友的标签");
   const reset = elementChildren(heading).find(
     (node) => typeof node !== "string"

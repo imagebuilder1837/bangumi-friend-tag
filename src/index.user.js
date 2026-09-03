@@ -435,12 +435,17 @@
     panel.setAttribute("class", "SimpleSidePanel");
     panel.setAttribute("style", "width:100%;");
 
-    // 标题行内放右对齐重置按钮：h2 自身带站内 clearit（:after 含
-    // clear:both 的真 clearfix），把 31px 的 rr 浮动关在 h2 内——
-    // 灰线（h2 border-bottom）画在按钮下方，浮动也不会泄漏到首行
-    // tagList 挤开右浮动计数。
+    // 标题行内放右对齐重置按钮。31px 浮动按钮会把 h2 撑高而文本
+    // 行盒仍停在顶部，调 padding 会连浮动一起平移、间隙不变，因此
+    // 用底对齐 flex：文本与按钮都贴住 border-bottom，且不耦合按钮
+    // 尺寸。浮动被 flex 忽略（rr 保留为无害冗余），也不能带 clearit
+    // ——其 :after 会变成可见的 flex item。站内无同类先例，此内联
+    // 样式为唯一手写新增（与 PANEL_LAYOUT_CSS 同理）。
     const heading = document.createElement("h2");
-    heading.setAttribute("class", "clearit");
+    heading.setAttribute(
+      "style",
+      "display:flex;align-items:flex-end;justify-content:space-between;",
+    );
     const resetButton = createChiiButton(document, "重置", "rr");
     heading.append(document.createTextNode("好友的标签"), resetButton);
 
