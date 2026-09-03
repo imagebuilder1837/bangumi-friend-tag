@@ -422,10 +422,142 @@ function cloudSettingsStub() {
   };
 }
 
+// ---- 组件模式（#5）：cloud_settings 后端 + localStorage 缓存 ----
+
+function makeLocalStorageStub(initialEntries = {}) {
+  const map = new Map(Object.entries(initialEntries));
+  return {
+    map,
+    getItem(key) {
+      return map.has(key) ? map.get(key) : null;
+    },
+    setItem(key, value) {
+      map.set(key, String(value));
+    },
+    removeItem(key) {
+      map.delete(key);
+    },
+  };
+}
+
+// fake cloud_settings 桩（docs/bangumi/cloud-settings.md 的 API 形状）：
+// 内存保存、记录 update/save 调用；deferGet 让 get 返回未决 promise，
+// 模拟云端数据延迟到达。
+function makeCloudSettingsStub(
+  initialTags,
+  { getThrows = false, rawValue, defer = false } = {}
+) {
+  const calls = { update: [], save: 0, get: 0 };
+  const data = {};
+  if (initialTags !== undefined) {
+    data[core.CLOUD_SETTINGS_KEY] = initialTags;
+  }
+  let deferred = null;
+  let lastDeferred = null;
+  const stub = {
+    update(patch) {
+      calls.update.push({ ...patch });
+      Object.assign(data, patch);
+    },
+    getAll() {
+      return { ...data };
+    },
+    get(key) {
+      calls.get += 1;
+      if (getThrows) throw new Error("cloud read failed");
+      if (deferred) return deferred.promise;
+      if (rawValue !== undefined && key === core.CLOUD_SETTINGS_KEY) {
+        return rawValue;
+      }
+      return data[key];
+    },
+    delete(key) {
+      delete data[key];
+    },
+    save() {
+      calls.save += 1;
+    },
+    deferGet() {
+      let resolveGet;
+      const promise = new Promise((resolve) => (resolveGet = resolve));
+      deferred = {
+        promise,
+        resolve(value) {
+          deferred = null;
+          resolveGet(value);
+        },
+      };
+      lastDeferred = deferred;
+      return deferred;
+    },
+  };
+  if (defer) stub.deferGet();
+  return {
+    stub,
+    calls,
+    data,
+    get deferred() {
+      return lastDeferred;
+    },
+  };
+}
+
+// 构造一次完整的组件模式初始化。cacheData（结构化映射）或 rawCache
+// （原始字符串，用于构造损坏缓存）预置 localStorage 缓存。
+function makeComponentPage(
+  fixtureName,
+  { pathname, cloudData, cacheData, rawCache, cloudOptions } = {}
+) {
+  const { document, root } = documentFromFixture(fixtureName);
+  const cacheEntries =
+    rawCache !== undefined
+      ? { [core.LOCAL_CACHE_KEY]: rawCache }
+      : cacheData === undefined
+        ? {}
+        : { [core.LOCAL_CACHE_KEY]: JSON.stringify(cacheData) };
+  const storage = makeLocalStorageStub(cacheEntries);
+  const cloud = makeCloudSettingsStub(cloudData, cloudOptions);
+  const dialog = {
+    prompt() {
+      return null;
+    },
+    confirm() {
+      return true;
+    },
+    alert() {},
+  };
+  const runtime = core.initialize({
+    document,
+    location: { pathname: pathname ?? "/user/sai/friends" },
+    chiiApp: { cloud_settings: cloud.stub },
+    localStorage: storage,
+    dialog,
+  });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  return { runtime, root, storage, cloud, flush, dialog };
+}
+
+function cachedTags(storage) {
+  const raw = storage.getItem(core.LOCAL_CACHE_KEY);
+  return raw === null ? null : JSON.parse(raw);
+}
+
+function tagLinkFor(root, href) {
+  const container = containerWithAvatarHref(root, href);
+  return tagLinks(root).find((link) =>
+    container.children.some(function has(node) {
+      return node === link || (node.children && node.children.some(has));
+    })
+  );
+}
+
 // ---- core API 与运行环境判定 ----
 
-test("core 暴露 initialize、normalizeTags、createUserScriptStore", () => {
+test("core 暴露 initialize、normalizeTags、两种 store 工厂与存储键常量", () => {
   assert.deepEqual(Object.keys(core).sort(), [
+    "CLOUD_SETTINGS_KEY",
+    "LOCAL_CACHE_KEY",
+    "createComponentStore",
     "createUserScriptStore",
     "initialize",
     "normalizeTags",
@@ -433,6 +565,9 @@ test("core 暴露 initialize、normalizeTags、createUserScriptStore", () => {
   assert.equal(typeof core.initialize, "function");
   assert.equal(typeof core.normalizeTags, "function");
   assert.equal(typeof core.createUserScriptStore, "function");
+  assert.equal(typeof core.createComponentStore, "function");
+  assert.equal(typeof core.CLOUD_SETTINGS_KEY, "string");
+  assert.equal(typeof core.LOCAL_CACHE_KEY, "string");
 });
 
 test("存在 GM_info 时判定为用户脚本模式", () => {
@@ -448,20 +583,19 @@ test("存在 GM_info 时判定为用户脚本模式", () => {
   });
 });
 
-test("存在 chiiApp.cloud_settings 时判定为组件模式且不修改页面 DOM", () => {
-  const { document, mutations } = documentFromFixture("rev_friends.html");
-  const runtime = core.initialize({
-    document,
-    location: { pathname: "/user/2/rev_friends" },
-    chiiApp: cloudSettingsStub(),
+test("存在 chiiApp.cloud_settings 时判定为组件模式并安装 tag 按钮与面板", () => {
+  const page = makeComponentPage("rev_friends.html", {
+    pathname: "/user/2/rev_friends",
+    cloudData: {},
   });
-  assert.deepEqual(runtime, {
+  assert.deepEqual(page.runtime, {
     mode: "component",
     page: { section: "rev_friends", ownerIdentifier: "2" },
   });
-  // 组件模式的 cloud_settings 后端未落地前不安装按钮，避免内存后端
-  // 造成「能编辑但刷新即丢」的体验（后续工单启用）。
-  assert.deepEqual(mutations, []);
+  const containers = userContainers(page.root);
+  assert.equal(tagLinks(page.root).length, containers.length);
+  assert.ok(tagPanel(page.root));
+  assert.ok(panelColumn(page.root));
 });
 
 test("GM_info 与 chiiApp 同时存在时用户脚本模式优先（ADR-0003）", () => {
@@ -1152,6 +1286,169 @@ test("导入后选中的筛选标签不存在时自动清除筛选", async () =>
 
   assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
   assert.deepEqual(tagListItems(page.root).map((i) => i.link.getAttribute("class")), ["l"]);
+});
+
+// ---- 组件模式：cloud_settings 后端（#5）----
+
+test("组件模式首次加载：无缓存时等待云端数据渲染，云端到达后出现标签", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["动画"], "614349": ["动画", "特摄"] },
+  });
+
+  // 云端数据尚未应用：面板为空状态。
+  assert.deepEqual(tagListItems(page.root), []);
+
+  await page.flush();
+  assert.deepEqual(
+    tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
+    [
+      { tag: "动画", count: "2" },
+      { tag: "特摄", count: "1" },
+    ]
+  );
+});
+
+test("组件模式首次加载：有缓存时先按缓存渲染，云端到达后以云端为准刷新", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["新"] },
+    cacheData: { puson_pp: ["旧"], "614349": ["特摄"] },
+  });
+
+  // 缓存优先：未让出事件循环前就已按缓存渲染。
+  assert.deepEqual(
+    tagListItems(page.root).map((item) => item.tag),
+    ["旧", "特摄"]
+  );
+
+  await page.flush();
+  // 未编辑的标识以云端为准：puson_pp 改为「新」；云端没有的 614349 条目删除。
+  assert.deepEqual(
+    tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
+    [{ tag: "新", count: "1" }]
+  );
+  // 合并产生变更 → 回写云端 + 缓存同步为合并结果。
+  const lastUpdate = page.cloud.calls.update.at(-1);
+  assert.deepEqual(lastUpdate[core.CLOUD_SETTINGS_KEY], { puson_pp: ["新"] });
+  assert.deepEqual(cachedTags(page.storage), { puson_pp: ["新"] });
+});
+
+test("合并方向：本地编辑过的用户标识保留本地值，其余以云端为准（ADR-0001）", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cacheData: { puson_pp: ["旧"], "614349": ["缓存"] },
+    cloudOptions: { defer: true },
+  });
+
+  // 云端数据到达前编辑 puson_pp。
+  page.dialog.prompt = () => "本地新标签";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+
+  page.cloud.deferred.resolve({
+    puson_pp: ["云端值"],
+    "614349": ["云端保留"],
+    madoka_kaname: ["云端新增"],
+  });
+  await page.flush();
+
+  const merged = cachedTags(page.storage);
+  assert.deepEqual(merged, {
+    puson_pp: ["本地新标签"],
+    "614349": ["云端保留"],
+    madoka_kaname: ["云端新增"],
+  });
+  // 合并产生变更 → 回写云端（update + save）。
+  const lastUpdate = page.cloud.calls.update.at(-1);
+  assert.deepEqual(lastUpdate[core.CLOUD_SETTINGS_KEY], merged);
+  assert.ok(page.cloud.calls.save >= 2, "编辑与合并回写各触发一次 save");
+});
+
+test("编辑标签后：update + save 写入云端，localStorage 缓存与云端数据结构一致", async () => {
+  const page = makeComponentPage("friends_logged.html", { cloudData: {} });
+  await page.flush();
+
+  page.dialog.prompt = () => "动画 监督 动画";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+
+  assert.deepEqual(page.cloud.calls.update, [
+    { [core.CLOUD_SETTINGS_KEY]: { puson_pp: ["动画", "监督"] } },
+  ]);
+  assert.equal(page.cloud.calls.save, 1);
+  assert.deepEqual(
+    cachedTags(page.storage),
+    page.cloud.data[core.CLOUD_SETTINGS_KEY]
+  );
+});
+
+test("编辑为空时清除该好友全部标签：云端映射中删除该键", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["旧"] },
+  });
+  await page.flush();
+
+  page.dialog.prompt = () => "   ";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  await page.flush();
+
+  assert.deepEqual(page.cloud.data[core.CLOUD_SETTINGS_KEY], {});
+  assert.deepEqual(cachedTags(page.storage), {});
+  assert.deepEqual(tagListItems(page.root), []);
+});
+
+test("云端读取抛错时跳过合并：本地数据保留、不回写、不抛错", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cacheData: { puson_pp: ["旧"] },
+    cloudOptions: { getThrows: true },
+  });
+
+  await page.flush();
+  assert.deepEqual(
+    tagListItems(page.root).map((item) => item.tag),
+    ["旧"]
+  );
+  assert.equal(page.cloud.calls.update.length, 0);
+  assert.equal(page.cloud.calls.save, 0);
+  assert.deepEqual(cachedTags(page.storage), { puson_pp: ["旧"] });
+});
+
+test("云端数据结构非法时跳过合并不回写", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cacheData: { puson_pp: ["旧"] },
+    cloudData: { sai: "not-an-array" },
+  });
+
+  await page.flush();
+  assert.deepEqual(
+    tagListItems(page.root).map((item) => item.tag),
+    ["旧"]
+  );
+  assert.equal(page.cloud.calls.update.length, 0);
+});
+
+test("云端读取返回 JSON 字符串时也能解析合并（防御序列化往返）", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudOptions: {
+      rawValue: JSON.stringify({ puson_pp: ["动画"] }),
+    },
+  });
+
+  await page.flush();
+  assert.deepEqual(
+    tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
+    [{ tag: "动画", count: "1" }]
+  );
+});
+
+test("localStorage 缓存损坏时按无缓存处理，等待云端数据渲染", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["动画"] },
+    rawCache: "not-json{",
+  });
+
+  assert.deepEqual(tagListItems(page.root), []);
+  await page.flush();
+  assert.deepEqual(
+    tagListItems(page.root).map((item) => item.tag),
+    ["动画"]
+  );
 });
 
 // ---- 浏览器自动初始化 ----

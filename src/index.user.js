@@ -36,6 +36,14 @@
   // 用户脚本模式下同浏览器切换账号会看到同一份数据，待后续工单处置。
   const STORAGE_KEY = "friendTags";
 
+  // 组件模式（ADR-0001，适用范围经 ADR-0003 收窄）：整张映射存放在
+  // cloud_settings 的单个键中（规避「无法删除最后一个 key」的已知坑），
+  // 并以结构一致的映射缓存到 localStorage 供下次启动缓存优先渲染。
+  // cloud_settings 的值会被字符串化，但字符串数组可安全往返；数字键会被
+  // 转成字符串键——用户标识本来就是字符串，无影响。
+  const CLOUD_SETTINGS_KEY = "friendTags";
+  const LOCAL_CACHE_KEY = "bangumi-friend-tag:friendTags";
+
   // 运行环境判定（ADR-0003）：存在 GM_info → 用户脚本模式；否则存在
   // chiiApp.cloud_settings → 组件模式；两者皆无 → 返回 null，调用方静默退出。
   function detectMode(deps) {
@@ -113,6 +121,120 @@
     }
 
     return { getAll, get, set };
+  }
+
+  function tagsEqual(a, b) {
+    return a.length === b.length && a.every((tag, index) => tag === b[index]);
+  }
+
+  // 解析 cloud_settings / localStorage 中的整张标签映射。值可能是对象
+  // （平台保留嵌套结构）或 JSON 字符串（防御双重序列化）；结构非法时
+  // 返回 null，由调用方决定跳过合并而非覆盖本地。
+  function parseTagMap(raw) {
+    let data = raw;
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        return null;
+      }
+    }
+    return validateStoreData(data);
+  }
+
+  // 组件模式后端（ADR-0001/0003）：cloud_settings 单键 + localStorage
+  // 缓存优先。统一 store 接口同用户脚本后端（getAll/get/set，同步），
+  // 另有 loadRemote()（返回 Promise）做后台云端合并：
+  //   - 启动时先用 localStorage 缓存同步渲染（无缓存则为空映射）；
+  //   - 云端到达后按用户标识条目级合并：本地编辑过（本次会话 set 过）
+  //     的标识优先，其余以云端为准；合并产生变更时回写云端（update +
+  //     save()），多标签页并发接受 last-write-wins；
+  //   - 云端读取抛错/结构非法/键不存在时跳过合并不回写，避免误清本地。
+  // save() 无回调（平台已知坑），保存结果无从感知，不依赖确认；所有
+  // cloud_settings 调用均吞错，持久化失败不影响页面内使用（还有缓存）。
+  function createComponentStore({ cloudSettings, localStorage: storage }) {
+    // 缓存损坏或 storage 不可用时按无缓存处理（空映射，等云端）。
+    let all = (() => {
+      try {
+        return parseTagMap(storage?.getItem?.(LOCAL_CACHE_KEY)) ?? {};
+      } catch {
+        return {};
+      }
+    })();
+    const edited = new Set();
+
+    function writeCache() {
+      try {
+        storage?.setItem?.(LOCAL_CACHE_KEY, JSON.stringify(all));
+      } catch {
+        // 缓存写入失败（如隐私模式）：页面内仍可用，下次启动等云端。
+      }
+    }
+
+    function persist() {
+      writeCache();
+      try {
+        // update 合并写入指定键；save() 手动触发保存（未加入个性化
+        // 面板时无自动保存），无回调、不等待、不依赖成功确认。
+        cloudSettings.update?.({ [CLOUD_SETTINGS_KEY]: all });
+        cloudSettings.save?.();
+      } catch {
+        // 云端写入失败无从感知：本地缓存已是最新，下次启动以缓存优先。
+      }
+    }
+
+    function getAll() {
+      return { ...all };
+    }
+
+    function get(identifier) {
+      const tags = all[identifier];
+      return Array.isArray(tags) ? tags.slice() : [];
+    }
+
+    function set(identifier, tags) {
+      if (tags.length === 0) delete all[identifier];
+      else all[identifier] = tags.slice();
+      edited.add(identifier);
+      persist();
+    }
+
+    // 按用户标识条目级合并云端数据；产生变更时回写并刷新缓存。
+    // 返回是否产生了变更。
+    function applyCloud(cloud) {
+      if (!cloud) return false;
+      let changed = false;
+      for (const [identifier, tags] of Object.entries(cloud)) {
+        if (edited.has(identifier)) continue;
+        const current = all[identifier];
+        if (!Array.isArray(current) || !tagsEqual(current, tags)) {
+          all[identifier] = tags.slice();
+          changed = true;
+        }
+      }
+      for (const identifier of Object.keys(all)) {
+        if (!edited.has(identifier) && !(identifier in cloud)) {
+          delete all[identifier];
+          changed = true;
+        }
+      }
+      if (changed) persist();
+      return changed;
+    }
+
+    function loadRemote() {
+      let raw;
+      try {
+        raw = cloudSettings.get?.(CLOUD_SETTINGS_KEY);
+      } catch {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve(raw)
+        .then((value) => applyCloud(parseTagMap(value)))
+        .catch(() => false);
+    }
+
+    return { getAll, get, set, loadRemote };
   }
 
   // 降级后端：GM API 不可用时（如未授予 @grant）的内存后端，保证页面内
@@ -445,12 +567,12 @@
   //                 Blob 下载与隐藏 file input 读取；
   //   gmInfo      — 用户脚本管理器注入的 GM_info，存在即用户脚本模式；
   //   gmGetValue / gmSetValue — 用户脚本模式的存储后端读写函数；
-  //   chiiApp     — 组件沙箱提供的 chiiApp，含 cloud_settings 即组件模式。
+  //   chiiApp     — 组件沙箱提供的 chiiApp，含 cloud_settings 即组件模式；
+  //   localStorage — 组件模式的本地缓存后端，缺省用全局 localStorage。
   // 返回运行环境描述符 { mode, page }；应静默退出时返回 null，且保证不
   // 读取、不修改页面 DOM。
-  // 本票只交付用户脚本模式后端（ADR-0003），tag 按钮与标签栏面板仅在
-  // 用户脚本模式安装；组件模式等 cloud_settings 后端落地后再启用（避免
-  // 先用内存后端造成「能编辑但刷新即丢」的体验）。
+  // 用户脚本模式：GM 后端同步读写（ADR-0003）。组件模式：cloud_settings
+  // 后端，缓存优先渲染 + 后台云端合并（ADR-0001），云端到达后刷新面板。
   function initialize(deps = {}) {
     const mode = detectMode(deps);
     if (!mode) return null;
@@ -458,10 +580,15 @@
     const page = parsePageType(deps.location?.pathname);
     if (!page) return null;
 
-    if (mode !== MODE.USERSCRIPT || !deps.document) return { mode, page };
+    if (!deps.document) return { mode, page };
 
     let store;
-    if (
+    if (mode === MODE.COMPONENT) {
+      store = createComponentStore({
+        cloudSettings: deps.chiiApp.cloud_settings,
+        localStorage: deps.localStorage ?? null,
+      });
+    } else if (
       typeof deps.gmGetValue === "function" &&
       typeof deps.gmSetValue === "function"
     ) {
@@ -489,6 +616,13 @@
       entries,
       onEdit: () => panel.refresh(),
     });
+
+    // 组件模式：云端数据后台到达后（无论是否合并出变更）刷新面板——
+    // 无缓存时此刻才首次渲染出云端标签，有缓存时用云端刷新缓存渲染。
+    // loadRemote 内部已吞掉所有错误，链路不会 reject。
+    if (mode === MODE.COMPONENT) {
+      store.loadRemote().then(() => panel.refresh());
+    }
 
     return { mode, page };
   }
@@ -526,6 +660,14 @@
       gmGetValue: typeof GM_getValue === "undefined" ? undefined : GM_getValue,
       gmSetValue: typeof GM_setValue === "undefined" ? undefined : GM_setValue,
       chiiApp: typeof chiiApp === "undefined" ? undefined : chiiApp,
+      // 隐私模式等场景下访问 localStorage 可能抛 SecurityError。
+      localStorage: (() => {
+        try {
+          return typeof localStorage === "undefined" ? undefined : localStorage;
+        } catch {
+          return undefined;
+        }
+      })(),
     };
   }
 
@@ -573,7 +715,14 @@
     };
   }
 
-  const core = { initialize, normalizeTags, createUserScriptStore };
+  const core = {
+    initialize,
+    normalizeTags,
+    createUserScriptStore,
+    createComponentStore,
+    CLOUD_SETTINGS_KEY,
+    LOCAL_CACHE_KEY,
+  };
 
   // 仅在 CommonJS 且无 document 的环境（即 node --test）导出 core；
   // 浏览器中跳过导出分支并自动初始化。
