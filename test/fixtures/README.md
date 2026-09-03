@@ -7,7 +7,9 @@
 | --- | --- | --- |
 | `friends.html` | `https://bgm.tv/user/sai/friends` | 未登录 GET（2025-09） |
 | `rev_friends.html` | `https://bgm.tv/user/sai/rev_friends` | 未登录 GET（2025-09） |
+| `friends_logged.html` | `https://bgm.tv/user/sai/friends` | 登录态 GET（人工抓取） |
+| `rev_friends_logged.html` | `https://bgm.tv/user/sai/rev_friends` | 登录态 GET（人工抓取） |
 
-注意：抓取时**未登录**，因此好友项中不含「PM / del」操作行。后续工单若
-需要依赖这些操作行的选择器（tag 按钮插入位置），需要人工提供登录态的
-真实页面 HTML 更新 fixture。
+未登录 fixture 的好友项中没有「PM / del」操作行，等价于「他人的页面」的
+DOM 形态（tag 按钮独立创建）；登录态 fixture 含操作行，覆盖「自己的
+friends 页（PM / del）」与「自己的 rev_friends 页（del）」两种形态。
