@@ -163,8 +163,7 @@
   // 不加账号后缀；localStorage 缓存键按浏览器隔离，必须带登录账号
   // 维度（account 参数），否则同浏览器切换账号会读到别人的缓存。
   // 统一 store 接口同用户脚本后端（getAll/get/set/replaceAll，同步），
-  // 另提供可选的 refreshRemote() 做后台云端合并。
-  // 另提供 refreshRemote()（返回 Promise）做后台云端合并：
+  // 另提供可选的 refreshRemote()（返回 Promise）做后台云端合并：
   //   - 启动时先用 localStorage 缓存同步渲染（无缓存则为空映射）；
   //   - 云端到达后按用户标识条目级合并：本地编辑过（本次会话 set 过）
   //     的标识优先，其余以云端为准；合并产生变更时回写云端（update +
@@ -385,7 +384,7 @@
     store.replaceAll(data);
   }
 
-  // 唯一手写的新样式（AGENTS.md 硬性规范 3）：双栏布局。好友页的
+  // 双栏布局。好友页的
   // .columns 是普通块级 + 浮动子栏（站内 display:flex 规则仅作用于
   // .wrapperNeue.mainXL，本页不适用）；columnUserSingle 实际占
   // 800px + 10px 右边距，新栏 190px 恰好占满剩余 1000px 行宽，
