@@ -369,10 +369,13 @@
     }
   }
 
-  // 唯一手写的新样式（AGENTS.md 硬性规范 3）：双栏布局。参数镜像站内
-  // 右栏 #columnSubjectBrowserB{flex:3;min-width:0;margin-left:10px}。
+  // 唯一手写的新样式（AGENTS.md 硬性规范 3）：双栏布局。好友页的
+  // .columns 是普通块级 + 浮动子栏（站内 display:flex 规则仅作用于
+  // .wrapperNeue.mainXL，本页不适用）；columnUserSingle 实际占
+  // 800px + 10px 右边距，新栏 190px 恰好占满剩余 1000px 行宽，
+  // 左边距依赖 columnUserSingle 自带右边距，不再另加。
   const PANEL_LAYOUT_CSS =
-    "#friendTagPanelColumn{flex:3;min-width:0;margin-left:10px}";
+    "#friendTagPanelColumn{float:left;width:190px;margin:10px 0 0 0}";
 
   function installPanelStyles(document) {
     const head = document.querySelector("head");
@@ -416,16 +419,24 @@
     panel.setAttribute("class", "SimpleSidePanel");
     panel.setAttribute("style", "width:190px;");
 
+    panel.setAttribute("style", "width:100%;");
+
+    // 标题保持纯净：31px 的 chiiBtn 浮在 h2 内会越过 h2 灰线并挤开
+    // 首行 tagList 的右浮动计数。重置按钮放独立的 clearit 动作行
+    // （站内 clearfix，:after clear:both），把浮动关在行内。
     const heading = document.createElement("h2");
+    heading.textContent = "好友的标签";
+    const headingActions = document.createElement("div");
+    headingActions.setAttribute("class", "clearit");
     const resetButton = createChiiButton(document, "重置", "rr");
-    heading.append(resetButton, document.createTextNode("好友的标签"));
+    headingActions.append(resetButton);
 
     const listHolder = document.createElement("div");
     const emptyTip = document.createElement("div");
     emptyTip.setAttribute("class", "tip");
     emptyTip.textContent = "暂无标签";
 
-    panel.append(heading, listHolder, emptyTip);
+    panel.append(heading, headingActions, listHolder, emptyTip);
 
     const actions = document.createElement("div");
     const exportButton = createChiiButton(document, "导出");
@@ -477,7 +488,8 @@
         const item = document.createElement("li");
         const link = document.createElement("a");
         link.setAttribute("href", "#;");
-        link.setAttribute("class", tag === selectedTag ? "l focus" : "l");
+        // 选中态复用站内 tagList 的状态类 on（.focus 在该上下文无样式）。
+        link.setAttribute("class", tag === selectedTag ? "l on" : "l");
         const countNode = document.createElement("small");
         countNode.textContent = String(count);
         link.append(countNode, document.createTextNode(tag));

@@ -1093,25 +1093,48 @@ test("面板插入 .columns 内 columnUserSingle 之后的新右栏，仅双栏�
   assert.ok(hasClass(column, "column"), "右栏应复用站内 .column 类");
 
   const panel = tagPanel(page.root);
-  assert.equal(panel.attributes.style, "width:190px;", "复刻站内 SimpleSidePanel 宽度内联样式");
+  // 栏宽是唯一定义点：面板按 100% 填满栏，不再各自写死宽度。
+  assert.equal(panel.attributes.style, "width:100%;", "SimpleSidePanel 按栏宽填满");
 
-  // 唯一手写的新样式：双栏布局规则，注入 head。
+  // 唯一手写的新样式：双栏布局规则，注入 head。好友页 .columns 是普通
+  // 块级 + 浮动子栏（display:flex 仅作用于 .wrapperNeue.mainXL），
+  // columnUserSingle 实际占 810px（800 宽 + 10 右边距），新栏 190px
+  // 恰好占满剩余行宽，不换行。
   const styles = [...walkElements(page.root)].filter(
     (node) => node.tagName === "style"
   );
   assert.equal(styles.length, 1);
-  assert.match(styles[0].textContent, /#friendTagPanelColumn\{[^}]*\}/);
+  assert.match(
+    styles[0].textContent,
+    /^#friendTagPanelColumn\{float:left;width:190px;margin:10px 0 0 0\}$/
+  );
 });
 
-test("标题「好友的标签」+ 右对齐 chiiBtn 重置；下方 chiiBtn 导出/导入", () => {
+test("标题「好友的标签」纯净；重置按钮在紧随其后的 clearit 动作行内右对齐", () => {
   const page = makeUserscriptPage("friends_logged.html", {
     pathname: "/user/sai/friends",
   });
 
   const panel = tagPanel(page.root);
-  const heading = elementChildren(panel).find((node) => node.tagName === "h2");
+  const children = elementChildren(panel);
+  const heading = children.find((node) => node.tagName === "h2");
   assert.equal(heading.children.at(-1), "好友的标签");
-  const reset = elementChildren(heading)[0];
+  // 标题内不放浮动按钮：31px 的 chiiBtn 会越过 h2 灰线并挤开首行计数。
+  assert.deepEqual(
+    elementChildren(heading).filter((node) => typeof node !== "string"),
+    [],
+    "h2 内不应有浮动按钮"
+  );
+
+  // 重置按钮放在紧随 h2 的独立动作行里，行本身是站内 clearit（含
+  // :after clear:both 的真 clearfix），把 rr 浮动关在行内。
+  const rowIndex = children.indexOf(heading) + 1;
+  const actionRow = children[rowIndex];
+  assert.ok(actionRow, "h2 之后应有动作行");
+  assert.ok(hasClass(actionRow, "clearit"), "动作行应复用站内 clearit clearfix");
+  const reset = elementChildren(actionRow).find(
+    (node) => typeof node !== "string"
+  );
   assert.equal(reset.tagName, "a");
   assert.deepEqual(
     (reset.attributes.class ?? "").split(/\s+/).sort(),
@@ -1193,7 +1216,7 @@ test("单击标签进入选中态并只显示含该标签的好友项；再点�
   // 点击后面板列表重建，需重新查询当前节点。
   const selected = tagListItems(page.root);
   assert.equal(selected[0].tag, "动画");
-  assert.equal(selected[0].link.getAttribute("class"), "l focus");
+  assert.equal(selected[0].link.getAttribute("class"), "l on");
   assert.deepEqual(visibleHrefs(page.root), [
     "/user/614349",
     "/user/puson_pp",
@@ -1224,7 +1247,7 @@ test("点击另一标签为单选切换筛选", () => {
   assert.equal(afterAnime.tag, "动画");
   assert.equal(afterAnime.link.getAttribute("class"), "l");
   assert.equal(afterTokusatsu.tag, "特摄");
-  assert.equal(afterTokusatsu.link.getAttribute("class"), "l focus");
+  assert.equal(afterTokusatsu.link.getAttribute("class"), "l on");
   assert.deepEqual(visibleHrefs(page.root), [
     "/user/614349",
     "/user/madoka_kaname",
