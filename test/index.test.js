@@ -19,6 +19,9 @@ class StubElement {
     this.attributes = {};
     this.children = [];
     this.clickListeners = [];
+    // 可见性筛选直接写 style.display；桩用普通对象承接属性写入。
+    this.style = {};
+    this.parent = null;
     this.#record = record;
   }
 
@@ -47,22 +50,48 @@ class StubElement {
   append(...nodes) {
     this.#record("append", { tagName: this.tagName, count: nodes.length });
     this.children.push(...nodes);
+    for (const node of nodes) {
+      if (typeof node !== "string") node.parent = this;
+    }
   }
 
   appendChild(node) {
     this.#record("appendChild", { tagName: this.tagName });
     this.children.push(node);
+    node.parent = this;
     return node;
   }
 
   insertBefore(node) {
     this.#record("insertBefore", { tagName: this.tagName });
     this.children.unshift(node);
+    node.parent = this;
+    return node;
+  }
+
+  // 面板右栏插入 columnUserSingle 之后用 afterend；其他位置一律断言失败。
+  insertAdjacentElement(position, node) {
+    this.#record("insertAdjacentElement", { tagName: this.tagName, position });
+    assert.equal(position, "afterend", `桩只支持 afterend 插入，收到：${position}`);
+    assert.ok(this.parent, "insertAdjacentElement 需要 parent 指针");
+    const index = this.parent.children.indexOf(this);
+    this.parent.children.splice(index + 1, 0, node);
+    node.parent = this.parent;
     return node;
   }
 
   remove() {
     this.#record("remove", { tagName: this.tagName });
+    if (this.parent) {
+      const index = this.parent.children.indexOf(this);
+      if (index !== -1) this.parent.children.splice(index, 1);
+      this.parent = null;
+    }
+  }
+
+  click() {
+    this.#record("click", { tagName: this.tagName });
+    for (const listener of this.clickListeners) listener({ preventDefault() {} });
   }
 
   addEventListener(type, listener) {
@@ -116,6 +145,7 @@ function parseFragment(html, record) {
     for (const attr of match[3].matchAll(/([\w-]+)(?:\s*=\s*"([^"]*)")?/g)) {
       element.attributes[attr[1]] = attr[2] ?? "";
     }
+    element.parent = stack.at(-1);
     stack.at(-1).children.push(element);
     if (!VOID_TAGS.has(element.tagName) && !match[0].endsWith("/>")) {
       stack.push(element);
@@ -190,7 +220,8 @@ function documentFromTree(root) {
   return { document, mutations };
 }
 
-// 从 fixture 构造 document 桩；root 是解析出的 memberUserList 子树根。
+// 从 fixture 构造 document 桩；root 是解析出的整页树（面板需要
+// .columns / #columnUserSingle / head，仅解析 memberUserList 子树不够）。
 function documentFromFixture(filename) {
   const html = fs.readFileSync(
     path.join(__dirname, "fixtures", filename),
@@ -198,10 +229,8 @@ function documentFromFixture(filename) {
   );
   // fixture 自检：确认内容确为好友/反向好友页结构。
   assert.match(html, /id=["']memberUserList["']/);
-  const blockMatch = /<ul id="memberUserList"[\s\S]*?<\/ul>/.exec(html);
-  assert.ok(blockMatch, `fixture ${filename} 中 memberUserList 未闭合`);
 
-  const root = parseFragment(blockMatch[0], () => {});
+  const root = parseFragment(html, () => {});
   const { document, mutations } = documentFromTree(root);
   return { document, root, mutations };
 }
@@ -227,12 +256,105 @@ function tagLinks(root) {
 }
 
 function clickTag(link) {
-  for (const listener of link.clickListeners) listener({ preventDefault() {} });
+  clickNode(link);
 }
 
-// 构造一次完整的用户脚本模式初始化：GM 存储由内存字符串模拟，prompt 桩
-// 可编程返回值并记录调用。
-function makeUserscriptPage(fixtureName, { pathname, storeData = {}, promptReturn } = {}) {
+function clickNode(node) {
+  for (const listener of node.clickListeners) listener({ preventDefault() {} });
+}
+
+// ---- 标签栏面板辅助 ----
+
+function findElement(root, predicate) {
+  return walkElements(root).find(predicate) ?? null;
+}
+
+function hasClass(node, cls) {
+  return (node.attributes.class ?? "").split(/\s+/).includes(cls);
+}
+
+function elementChildren(node) {
+  return node.children.filter((child) => typeof child !== "string");
+}
+
+function tagPanel(root) {
+  return findElement(root, (node) => hasClass(node, "SimpleSidePanel"));
+}
+
+function panelColumn(root) {
+  return findElement(root, (node) => node.attributes.id === "friendTagPanelColumn");
+}
+
+function columnsElement(root) {
+  return findElement(root, (node) => hasClass(node, "columns"));
+}
+
+function emptyTip(root) {
+  return findElement(
+    root,
+    (node) => hasClass(node, "tip") && node.textContent === "暂无标签"
+  );
+}
+
+function chiiButtons(root) {
+  return [...walkElements(root)].filter(
+    (node) => node.tagName === "a" && hasClass(node, "chiiBtn")
+  );
+}
+
+function chiiButtonByLabel(root, label) {
+  return chiiButtons(root).find((node) => node.textContent === label) ?? null;
+}
+
+// tagList 的每个 li：{ tag, count, link }（结构与站内
+// `<li><a class="l"><small>计数</small>标签</a></li>` 一致）。
+function tagListItems(root) {
+  const panel = tagPanel(root);
+  if (!panel) return [];
+  const list = [...walkElements(panel)].find(
+    (node) => node.tagName === "ul" && hasClass(node, "tagList")
+  );
+  if (!list) return [];
+  return elementChildren(list).map((li) => {
+    const link = elementChildren(li)[0];
+    const [countNode] = elementChildren(link);
+    return {
+      tag: link.children.at(-1),
+      count: countNode.textContent,
+      link,
+    };
+  });
+}
+
+function listItemsByHref(root) {
+  const map = new Map();
+  for (const li of root.querySelectorAll("li.user")) {
+    const href = li.querySelector("a.avatar")?.getAttribute("href");
+    if (href !== null && href !== undefined) map.set(href, li);
+  }
+  return map;
+}
+
+function visibleHrefs(root) {
+  return [...listItemsByHref(root).entries()]
+    .filter(([, li]) => li.style.display !== "none")
+    .map(([href]) => href)
+    .sort();
+}
+
+// 构造一次完整的用户脚本模式初始化：GM 存储由内存字符串模拟，
+// prompt/confirm/alert 桩可编程返回值并记录调用，files 桩记录下载并
+// 提供可编程的文件读取结果。
+function makeUserscriptPage(
+  fixtureName,
+  {
+    pathname,
+    storeData = {},
+    promptReturn,
+    confirmReturn = true,
+    readTextReturn,
+  } = {}
+) {
   const { document, root, mutations } = documentFromFixture(fixtureName);
   let serialized = JSON.stringify(storeData);
   const gmGetValue = () => serialized;
@@ -240,10 +362,30 @@ function makeUserscriptPage(fixtureName, { pathname, storeData = {}, promptRetur
     serialized = value;
   };
   const promptCalls = [];
+  const confirmCalls = [];
+  const alertCalls = [];
+  const readTextCalls = [];
+  const downloads = [];
   const dialog = {
     prompt(message, defaultValue) {
       promptCalls.push({ message, defaultValue });
       return promptReturn;
+    },
+    confirm(message) {
+      confirmCalls.push(message);
+      return confirmReturn;
+    },
+    alert(message) {
+      alertCalls.push(message);
+    },
+  };
+  const files = {
+    download(filename, text) {
+      downloads.push({ filename, text });
+    },
+    readText() {
+      readTextCalls.push(true);
+      return Promise.resolve(readTextReturn ?? null);
     },
   };
   const runtime = core.initialize({
@@ -253,12 +395,17 @@ function makeUserscriptPage(fixtureName, { pathname, storeData = {}, promptRetur
     gmGetValue,
     gmSetValue,
     dialog,
+    files,
   });
   return {
     runtime,
     root,
     mutations,
     promptCalls,
+    confirmCalls,
+    alertCalls,
+    readTextCalls,
+    downloads,
     readStore: () => JSON.parse(serialized),
   };
 }
@@ -641,6 +788,370 @@ test("同一好友在 friends 与 rev_friends 页面共享同一套标签（ADR-
   );
   clickTag(tagLink);
   assert.equal(revPage.promptCalls[0].defaultValue, "共同好友");
+});
+
+// ---- 标签栏面板：结构与渲染 ----
+
+test("面板插入 .columns 内 columnUserSingle 之后的新右栏，仅双栏布局为新 CSS", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画", "监督"] },
+  });
+
+  const columns = columnsElement(page.root);
+  const ids = elementChildren(columns).map((node) => node.attributes.id);
+  assert.deepEqual(ids, ["columnUserSingle", "friendTagPanelColumn"]);
+
+  const column = panelColumn(page.root);
+  assert.ok(hasClass(column, "column"), "右栏应复用站内 .column 类");
+
+  const panel = tagPanel(page.root);
+  assert.equal(panel.attributes.style, "width:190px;", "复刻站内 SimpleSidePanel 宽度内联样式");
+
+  // 唯一手写的新样式：双栏布局规则，注入 head。
+  const styles = [...walkElements(page.root)].filter(
+    (node) => node.tagName === "style"
+  );
+  assert.equal(styles.length, 1);
+  assert.match(styles[0].textContent, /#friendTagPanelColumn\{[^}]*\}/);
+});
+
+test("标题「好友的标签」+ 右对齐 chiiBtn 重置；下方 chiiBtn 导出/导入", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+  });
+
+  const panel = tagPanel(page.root);
+  const heading = elementChildren(panel).find((node) => node.tagName === "h2");
+  assert.equal(heading.children.at(-1), "好友的标签");
+  const reset = elementChildren(heading)[0];
+  assert.equal(reset.tagName, "a");
+  assert.deepEqual(
+    (reset.attributes.class ?? "").split(/\s+/).sort(),
+    ["chiiBtn", "rr"]
+  );
+  assert.equal(reset.textContent, "重置");
+
+  assert.equal(chiiButtonByLabel(page.root, "导出") !== null, true);
+  assert.equal(chiiButtonByLabel(page.root, "导入") !== null, true);
+});
+
+test("面板渲染标签与计数、按数量降序、计数右对齐结构复刻站内 tagList", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: {
+      puson_pp: ["动画", "监督"],
+      "614349": ["动画", "特摄"],
+      madoka_kaname: ["动画"],
+    },
+  });
+
+  const items = tagListItems(page.root);
+  assert.deepEqual(
+    items.map(({ tag, count }) => ({ tag, count })),
+    [
+      { tag: "动画", count: "3" },
+      // 同计数按码元序稳定排序（特 U+7279 < 监 U+76D1）。
+      { tag: "特摄", count: "1" },
+      { tag: "监督", count: "1" },
+    ]
+  );
+  for (const { link } of items) {
+    assert.equal(link.getAttribute("href"), "#;");
+    assert.equal(link.getAttribute("class"), "l");
+    // 计数 small 在前，右对齐交给站内 .tagList li a small 的浮动规则。
+    assert.equal(link.children[0].tagName, "small");
+  }
+});
+
+test("计数与列表只聚合当前页面实际出现的好友", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"], absent_user: ["动画"] },
+  });
+  assert.deepEqual(tagListItems(page.root).map((i) => i.tag), ["动画"]);
+  assert.equal(tagListItems(page.root)[0].count, "1");
+});
+
+test("空状态显示 tip「暂无标签」而非空白，标题与按钮常驻", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: {},
+  });
+
+  assert.deepEqual(tagListItems(page.root), []);
+  const tip = emptyTip(page.root);
+  assert.ok(tip, "应有「暂无标签」提示");
+  assert.notEqual(tip.style.display, "none");
+  assert.ok(tagPanel(page.root));
+  assert.ok(chiiButtonByLabel(page.root, "重置"));
+  assert.ok(chiiButtonByLabel(page.root, "导出"));
+  assert.ok(chiiButtonByLabel(page.root, "导入"));
+});
+
+// ---- 标签栏面板：筛选 ----
+
+test("单击标签进入选中态并只显示含该标签的好友项；再点同一标签取消", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: {
+      puson_pp: ["动画"],
+      "614349": ["动画", "特摄"],
+      madoka_kaname: ["特摄"],
+    },
+  });
+  const [anime] = tagListItems(page.root);
+
+  clickNode(anime.link);
+  // 点击后面板列表重建，需重新查询当前节点。
+  const selected = tagListItems(page.root);
+  assert.equal(selected[0].tag, "动画");
+  assert.equal(selected[0].link.getAttribute("class"), "l focus");
+  assert.deepEqual(visibleHrefs(page.root), [
+    "/user/614349",
+    "/user/puson_pp",
+  ]);
+
+  clickNode(selected[0].link);
+  const deselected = tagListItems(page.root);
+  assert.equal(deselected[0].tag, "动画");
+  assert.equal(deselected[0].link.getAttribute("class"), "l");
+  assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
+});
+
+test("点击另一标签为单选切换筛选", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: {
+      puson_pp: ["动画"],
+      "614349": ["动画", "特摄"],
+      madoka_kaname: ["特摄"],
+    },
+  });
+  const [anime] = tagListItems(page.root);
+
+  clickNode(anime.link);
+  const [, tokusatsu] = tagListItems(page.root);
+  clickNode(tokusatsu.link);
+  const [afterAnime, afterTokusatsu] = tagListItems(page.root);
+  assert.equal(afterAnime.tag, "动画");
+  assert.equal(afterAnime.link.getAttribute("class"), "l");
+  assert.equal(afterTokusatsu.tag, "特摄");
+  assert.equal(afterTokusatsu.link.getAttribute("class"), "l focus");
+  assert.deepEqual(visibleHrefs(page.root), [
+    "/user/614349",
+    "/user/madoka_kaname",
+  ]);
+});
+
+test("重置按钮清除筛选且恢复全部好友项；无筛选时点击无副作用", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"], "614349": ["特摄"] },
+  });
+  const reset = chiiButtonByLabel(page.root, "重置");
+
+  // 无筛选时：无任何可见变化，数据不变。
+  clickNode(reset);
+  assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
+  assert.deepEqual(page.readStore(), { puson_pp: ["动画"], "614349": ["特摄"] });
+
+  clickNode(tagListItems(page.root)[0].link);
+  assert.deepEqual(visibleHrefs(page.root), ["/user/puson_pp"]);
+  clickNode(reset);
+  assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
+  const [first] = tagListItems(page.root);
+  assert.equal(first.link.getAttribute("class"), "l");
+});
+test("tag 按钮编辑后面板计数刷新，且当前筛选立即重新应用", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"] },
+    promptReturn: "动画",
+  });
+  const container = containerWithAvatarHref(page.root, "/user/614349");
+  const tagLink = tagLinks(page.root).find((link) =>
+    container.children.some(function has(node) {
+      return node === link || (node.children && node.children.some(has));
+    })
+  );
+
+  clickNode(tagListItems(page.root)[0].link);
+  assert.deepEqual(visibleHrefs(page.root), ["/user/puson_pp"]);
+
+  clickTag(tagLink); // 给 614349 也打上「动画」
+  const [anime] = tagListItems(page.root);
+  assert.deepEqual(
+    { tag: anime.tag, count: anime.count },
+    { tag: "动画", count: "2" }
+  );
+  // 筛选仍在选中态，新打上该标签的好友项立即变为可见。
+  assert.deepEqual(visibleHrefs(page.root), [
+    "/user/614349",
+    "/user/puson_pp",
+  ]);
+});
+
+// ---- 导出 / 导入 ----
+
+test("导出：confirm 确认后下载原始 store 的 pretty JSON", async () => {
+  const data = { puson_pp: ["动画", "监督"], "614349": [] };
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: data,
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导出"));
+  assert.equal(page.confirmCalls.length, 1);
+  assert.equal(page.downloads.length, 1);
+  const { filename, text } = page.downloads[0];
+  assert.match(filename, /\.json$/);
+  assert.deepEqual(JSON.parse(text), data);
+  assert.ok(text.includes("\n"), "应为 pretty 打印的 JSON");
+});
+
+test("导出：confirm 取消后不下载且无任何变更", () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"] },
+    confirmReturn: false,
+  });
+  clickNode(chiiButtonByLabel(page.root, "导出"));
+  assert.equal(page.downloads.length, 0);
+  assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
+});
+
+test("导入：合法 JSON 覆盖现有数据并刷新面板", async () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["旧"], "614349": ["保留"] },
+    readTextReturn: JSON.stringify({ puson_pp: ["新"], "614349": ["y"] }),
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(page.alertCalls.length, 0);
+  // 文件是唯一事实来源：不在文件里的条目（madoka_kaname）被清除。
+  assert.deepEqual(page.readStore(), {
+    puson_pp: ["新"],
+    "614349": ["y"],
+  });
+  assert.deepEqual(
+    tagListItems(page.root).map(({ tag, count }) => ({ tag, count })),
+    [
+      { tag: "y", count: "1" },
+      { tag: "新", count: "1" },
+    ]
+  );
+});
+
+test("导入：文件读取失败时 alert 提示且数据与面板不变（区别于取消）", async () => {
+  const { document, root, mutations } = documentFromFixture("friends_logged.html");
+  let serialized = JSON.stringify({ puson_pp: ["动画"] });
+  const alertCalls = [];
+  const runtime = core.initialize({
+    document,
+    location: { pathname: "/user/sai/friends" },
+    gmInfo: { scriptMetaStr: "" },
+    gmGetValue: () => serialized,
+    gmSetValue: (key, value) => {
+      serialized = value;
+    },
+    dialog: {
+      confirm: () => true,
+      alert: (message) => alertCalls.push(message),
+    },
+    files: {
+      download() {},
+      readText: () => Promise.reject(new Error("read failed")),
+    },
+  });
+  assert.ok(runtime);
+
+  clickNode(chiiButtonByLabel(root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(alertCalls.length, 1);
+  assert.deepEqual(JSON.parse(serialized), { puson_pp: ["动画"] });
+  assert.deepEqual(
+    tagListItems(root).map((item) => item.tag),
+    ["动画"]
+  );
+});
+
+test("导入：confirm 取消时不读取文件、数据与面板不变", async () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"] },
+    confirmReturn: false,
+    readTextReturn: JSON.stringify({ evil: [] }),
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(page.readTextCalls.length, 0);
+  assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
+  assert.deepEqual(tagListItems(page.root).map((i) => i.tag), ["动画"]);
+});
+
+test("导入：文件选择取消时数据与面板不变", async () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"] },
+    readTextReturn: null,
+  });
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(page.alertCalls.length, 0);
+  assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
+});
+
+test("导入：非法结构被拒绝、alert 提示、现有数据与面板不变", async () => {
+  for (const text of [
+    "not json{",
+    "null",
+    "[1, 2]",
+    JSON.stringify({ a: "b" }),
+    JSON.stringify({ a: [1] }),
+  ]) {
+    const page = makeUserscriptPage("friends_logged.html", {
+      pathname: "/user/sai/friends",
+      storeData: { puson_pp: ["动画"] },
+      readTextReturn: text,
+    });
+    const panelBefore = tagListItems(page.root).map((i) => i.tag);
+
+    clickNode(chiiButtonByLabel(page.root, "导入"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(page.alertCalls.length, 1, `应 alert：${text}`);
+    assert.deepEqual(page.readStore(), { puson_pp: ["动画"] });
+    assert.deepEqual(
+      tagListItems(page.root).map((i) => i.tag),
+      panelBefore
+    );
+  }
+});
+
+test("导入后选中的筛选标签不存在时自动清除筛选", async () => {
+  const page = makeUserscriptPage("friends_logged.html", {
+    pathname: "/user/sai/friends",
+    storeData: { puson_pp: ["动画"] },
+    readTextReturn: JSON.stringify({ "614349": ["特摄"] }),
+  });
+
+  clickNode(tagListItems(page.root)[0].link);
+  assert.deepEqual(visibleHrefs(page.root), ["/user/puson_pp"]);
+
+  clickNode(chiiButtonByLabel(page.root, "导入"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(visibleHrefs(page.root).length, listItemsByHref(page.root).size);
+  assert.deepEqual(tagListItems(page.root).map((i) => i.link.getAttribute("class")), ["l"]);
 });
 
 // ---- 浏览器自动初始化 ----

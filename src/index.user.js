@@ -145,7 +145,7 @@
     }
   }
 
-  function createTagLink({ document, store, dialog, identifier }) {
+  function createTagLink({ document, store, dialog, identifier, onEdit }) {
     const link = document.createElement("a");
     link.setAttribute("href", "#;");
     link.setAttribute("class", "l");
@@ -159,16 +159,17 @@
       );
       if (raw === null || raw === undefined) return;
       store.set(identifier, normalizeTags(raw));
+      onEdit?.(identifier);
     });
     return link;
   }
 
-  // 在每个好友项上安装 tag 按钮。有 PM/del 操作行（small.grey）的项把
-  // tag 追加到行尾；没有的（他人页面）按 del 的样式创建独立按钮，插在
-  // 原操作行所在的位置（userContainer 末尾）。
-  function installTagButtons({ document, store, dialog }) {
+  // 收集当前页面实际出现的全部好友项。两类页面均无分页，面板的计数、
+  // 标签列表与筛选都以这份清单为准。
+  function collectFriendEntries(document) {
     const list = document.querySelector("#memberUserList");
-    if (!list) return;
+    if (!list) return [];
+    const entries = [];
     for (const item of list.querySelectorAll("li.user")) {
       const container = item.querySelector("div.userContainer");
       if (!container) continue;
@@ -176,12 +177,254 @@
         container.querySelector("a.avatar")?.getAttribute("href"),
       );
       if (!identifier) continue;
+      entries.push({ identifier, item, container });
+    }
+    return entries;
+  }
 
-      const tagLink = createTagLink({ document, store, dialog, identifier });
+  // 导入数据结构校验：顶层对象、值均为字符串数组。不合法时返回 null。
+  function validateStoreData(data) {
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      return null;
+    }
+    const result = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (
+        !Array.isArray(value) ||
+        value.some((tag) => typeof tag !== "string")
+      ) {
+        return null;
+      }
+      result[key] = value.slice();
+    }
+    return result;
+  }
+
+  // 以导入数据覆盖整张 store：文件是唯一事实来源，现有数据中不在文件
+  // 里的好友条目一并清除。
+  function replaceStoreData(store, data) {
+    for (const identifier of Object.keys(store.getAll())) {
+      if (!(identifier in data)) store.set(identifier, []);
+    }
+    for (const [identifier, tags] of Object.entries(data)) {
+      store.set(identifier, tags);
+    }
+  }
+
+  // 唯一手写的新样式（AGENTS.md 硬性规范 3）：双栏布局。参数镜像站内
+  // 右栏 #columnSubjectBrowserB{flex:3;min-width:0;margin-left:10px}。
+  const PANEL_LAYOUT_CSS =
+    "#friendTagPanelColumn{flex:3;min-width:0;margin-left:10px}";
+
+  function installPanelStyles(document) {
+    const head = document.querySelector("head");
+    if (!head) return;
+    const style = document.createElement("style");
+    style.textContent = PANEL_LAYOUT_CSS;
+    head.append(style);
+  }
+
+  // 站内 chiiBtn 的标准写法：<a class="chiiBtn"><span>文案</span></a>；
+  // extraClass 追加站内工具类（如 .rr{float:right} 右对齐）。
+  function createChiiButton(document, label, extraClass) {
+    const button = document.createElement("a");
+    button.setAttribute("href", "#;");
+    button.setAttribute(
+      "class",
+      extraClass ? `chiiBtn ${extraClass}` : "chiiBtn",
+    );
+    const span = document.createElement("span");
+    span.textContent = label;
+    button.append(span);
+    return button;
+  }
+
+  // 「好友的标签」栏：复刻条目页 SimpleSidePanel（标题 + tagList，计数
+  // 复用站内 .tagList li a small 的右对齐浮动，见「我看过的动画」页
+  // userTagList 的原始标记）。插入 .columns 内 columnUserSingle 之后的
+  // 新右栏；空状态用站内 tip 风格「暂无标签」，标题与三个按钮常驻。
+  // 筛选为单选，通过直接切换好友项可见性实现（不走 URL）；对数千好友
+  // 项只做属性写入、不读取任何布局信息，避免逐项强制同步布局。
+  function createTagPanel({ document, store, dialog, entries, files }) {
+    const columns = document.querySelector(".columns");
+    if (!columns) return { refresh() {} };
+    installPanelStyles(document);
+
+    const column = document.createElement("div");
+    column.setAttribute("class", "column");
+    column.setAttribute("id", "friendTagPanelColumn");
+
+    const panel = document.createElement("div");
+    panel.setAttribute("class", "SimpleSidePanel");
+    panel.setAttribute("style", "width:190px;");
+
+    const heading = document.createElement("h2");
+    const resetButton = createChiiButton(document, "重置", "rr");
+    heading.append(resetButton, document.createTextNode("好友的标签"));
+
+    const listHolder = document.createElement("div");
+    const emptyTip = document.createElement("div");
+    emptyTip.setAttribute("class", "tip");
+    emptyTip.textContent = "暂无标签";
+
+    panel.append(heading, listHolder, emptyTip);
+
+    const actions = document.createElement("div");
+    const exportButton = createChiiButton(document, "导出");
+    const importButton = createChiiButton(document, "导入");
+    actions.append(exportButton, importButton);
+
+    column.append(panel, actions);
+
+    const anchor = columns.querySelector("#columnUserSingle");
+    if (anchor && typeof anchor.insertAdjacentElement === "function") {
+      anchor.insertAdjacentElement("afterend", column);
+    } else {
+      columns.append(column);
+    }
+
+    let selectedTag = null;
+    let filterApplied = false;
+    let currentList = null;
+
+    // 计数与筛选共用同一份 store 快照，避免逐好友重复读取整张存储。
+    function snapshot() {
+      const all = store.getAll();
+      const counts = new Map();
+      for (const { identifier } of entries) {
+        const tags = all[identifier];
+        if (!Array.isArray(tags)) continue;
+        for (const tag of new Set(tags)) {
+          counts.set(tag, (counts.get(tag) ?? 0) + 1);
+        }
+      }
+      return { all, counts };
+    }
+
+    function renderList(counts) {
+      if (currentList) currentList.remove();
+      currentList = null;
+      if (counts.size === 0) {
+        emptyTip.style.display = "";
+        return;
+      }
+      emptyTip.style.display = "none";
+      const list = document.createElement("ul");
+      list.setAttribute("class", "tagList");
+      const sorted = [...counts.entries()].sort(
+        ([tagA, countA], [tagB, countB]) =>
+          countB - countA || (tagA < tagB ? -1 : 1),
+      );
+      for (const [tag, count] of sorted) {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.setAttribute("href", "#;");
+        link.setAttribute("class", tag === selectedTag ? "l focus" : "l");
+        const countNode = document.createElement("small");
+        countNode.textContent = String(count);
+        link.append(countNode, document.createTextNode(tag));
+        link.addEventListener("click", (event) => {
+          event?.preventDefault?.();
+          selectedTag = selectedTag === tag ? null : tag;
+          refresh();
+        });
+        item.append(link);
+        list.append(item);
+      }
+      listHolder.append(list);
+      currentList = list;
+    }
+
+    function applyFilter(all) {
+      const shouldFilter = selectedTag !== null;
+      if (!shouldFilter && !filterApplied) return;
+      filterApplied = shouldFilter;
+      for (const { identifier, item } of entries) {
+        const tags = all[identifier];
+        const visible =
+          !shouldFilter || (Array.isArray(tags) && tags.includes(selectedTag));
+        item.style.display = visible ? "" : "none";
+      }
+    }
+
+    function refresh() {
+      const { all, counts } = snapshot();
+      if (selectedTag !== null && !counts.has(selectedTag)) selectedTag = null;
+      renderList(counts);
+      applyFilter(all);
+    }
+
+    resetButton.addEventListener("click", (event) => {
+      event?.preventDefault?.();
+      if (selectedTag === null) return; // 无筛选时无副作用
+      selectedTag = null;
+      refresh();
+    });
+
+    exportButton.addEventListener("click", (event) => {
+      event?.preventDefault?.();
+      if (
+        typeof dialog?.confirm !== "function" ||
+        !dialog.confirm("导出好友标签数据？")
+      ) {
+        return;
+      }
+      files?.download?.(
+        "bangumi-friend-tag-export.json",
+        `${JSON.stringify(store.getAll(), null, 2)}\n`,
+      );
+    });
+
+    importButton.addEventListener("click", (event) => {
+      event?.preventDefault?.();
+      if (typeof dialog?.confirm !== "function") return;
+      if (!dialog.confirm("导入将覆盖现有全部标签数据，确定继续？")) return;
+      Promise.resolve(files?.readText?.() ?? null)
+        .then((text) => {
+          if (text == null) return; // 用户取消了文件选择
+          let parsed = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            // 保持 null，走下方结构校验失败分支。
+          }
+          const data = validateStoreData(parsed);
+          if (!data) {
+            dialog?.alert?.(
+              "导入失败：文件不是合法的好友标签数据（应为对象，且值为字符串数组）。",
+            );
+            return;
+          }
+          replaceStoreData(store, data);
+          refresh();
+        })
+        .catch(() => {
+          dialog?.alert?.("导入失败：无法读取所选文件。");
+        });
+    });
+
+    refresh();
+    return { refresh };
+  }
+
+  // 在每个好友项上安装 tag 按钮。有 PM/del 操作行（small.grey）的项把
+  // tag 追加到行尾；没有的（他人页面）按 del 的样式创建独立按钮，插在
+  // 原操作行所在的位置（userContainer 末尾）。
+  // entries 为 collectFriendEntries 收集的当前页好友项清单，onEdit 在
+  // 每次编辑保存后回调（供标签栏面板刷新）。
+  function installTagButtons({ document, store, dialog, entries, onEdit }) {
+    for (const { identifier, container } of entries) {
+      const tagLink = createTagLink({
+        document,
+        store,
+        dialog,
+        identifier,
+        onEdit,
+      });
       const opRow = container.querySelector("small.grey");
-      const delLink = opRow
-        ?.querySelectorAll("a")
-        .find((anchor) => anchor.textContent.trim() === "del");
+      const delLink = [...(opRow?.querySelectorAll("a") ?? [])].find(
+        (anchor) => anchor.textContent.trim() === "del",
+      );
       if (opRow && delLink) {
         opRow.append(document.createTextNode(" / "), tagLink);
       } else {
@@ -196,15 +439,18 @@
   // 依赖注入入口。deps（均可省略，浏览器中缺省回退到全局对象）：
   //   document    — 页面 Document；
   //   location    — 页面 Location；
-  //   dialog      — { prompt } 页面对话框桩，缺省用全局 prompt；
+  //   dialog      — { prompt, confirm, alert } 页面对话框桩，缺省用全局
+  //                 prompt/confirm/alert；
+  //   files       — { download, readText } 文件桥桩，缺省用浏览器
+  //                 Blob 下载与隐藏 file input 读取；
   //   gmInfo      — 用户脚本管理器注入的 GM_info，存在即用户脚本模式；
   //   gmGetValue / gmSetValue — 用户脚本模式的存储后端读写函数；
   //   chiiApp     — 组件沙箱提供的 chiiApp，含 cloud_settings 即组件模式。
   // 返回运行环境描述符 { mode, page }；应静默退出时返回 null，且保证不
   // 读取、不修改页面 DOM。
-  // 本票只交付用户脚本模式后端（ADR-0003），tag 按钮仅在用户脚本模式
-  // 安装；组件模式等 cloud_settings 后端落地后再启用（避免先用内存后端
-  // 造成「能编辑但刷新即丢」的体验）。
+  // 本票只交付用户脚本模式后端（ADR-0003），tag 按钮与标签栏面板仅在
+  // 用户脚本模式安装；组件模式等 cloud_settings 后端落地后再启用（避免
+  // 先用内存后端造成「能编辑但刷新即丢」的体验）。
   function initialize(deps = {}) {
     const mode = detectMode(deps);
     if (!mode) return null;
@@ -227,7 +473,22 @@
       warnStorageFallback();
       store = createMemoryStore();
     }
-    installTagButtons({ document: deps.document, store, dialog: deps.dialog });
+
+    const entries = collectFriendEntries(deps.document);
+    const panel = createTagPanel({
+      document: deps.document,
+      store,
+      dialog: deps.dialog,
+      entries,
+      files: deps.files ?? defaultFiles(),
+    });
+    installTagButtons({
+      document: deps.document,
+      store,
+      dialog: deps.dialog,
+      entries,
+      onEdit: () => panel.refresh(),
+    });
 
     return { mode, page };
   }
@@ -246,16 +507,69 @@
     return {
       document: typeof document === "undefined" ? undefined : document,
       location: typeof location === "undefined" ? undefined : location,
-      dialog:
-        typeof prompt === "undefined"
-          ? undefined
-          : {
-              prompt: (message, defaultValue) => prompt(message, defaultValue),
-            },
+      dialog: {
+        prompt:
+          typeof prompt === "undefined"
+            ? undefined
+            : (message, defaultValue) => prompt(message, defaultValue),
+        confirm:
+          typeof confirm === "undefined"
+            ? undefined
+            : (message) => confirm(message),
+        alert:
+          typeof alert === "undefined"
+            ? undefined
+            : (message) => alert(message),
+      },
+      files: defaultFiles(),
       gmInfo: typeof GM_info === "undefined" ? undefined : GM_info,
       gmGetValue: typeof GM_getValue === "undefined" ? undefined : GM_getValue,
       gmSetValue: typeof GM_setValue === "undefined" ? undefined : GM_setValue,
       chiiApp: typeof chiiApp === "undefined" ? undefined : chiiApp,
+    };
+  }
+
+  // 浏览器文件桥（导出下载与导入文件选择）。Blob/URL 不可用时导出为
+  // 无操作；导入通过隐藏 file input 读取文本：用户取消选择时以 null
+  // 结束（数据不变），读取失败时 reject（由调用方 alert 区分于取消）。
+  function defaultFiles() {
+    if (typeof document === "undefined") return undefined;
+    return {
+      download(filename, text) {
+        if (
+          typeof Blob === "undefined" ||
+          typeof URL?.createObjectURL !== "function"
+        ) {
+          return;
+        }
+        const url = URL.createObjectURL(
+          new Blob([text], { type: "application/json" }),
+        );
+        const anchor = document.createElement("a");
+        anchor.setAttribute("href", url);
+        anchor.setAttribute("download", filename);
+        anchor.click();
+        URL.revokeObjectURL(url);
+      },
+      readText() {
+        return new Promise((resolve, reject) => {
+          const input = document.createElement("input");
+          input.setAttribute("type", "file");
+          input.setAttribute("accept", ".json,application/json");
+          // 现代浏览器在未选文件关闭文件框时触发 cancel；不支持的
+          // 环境下 promise 保持 pending，数据同样不变。
+          input.addEventListener("cancel", () => resolve(null));
+          input.addEventListener("change", () => {
+            const file = input.files?.[0];
+            if (!file) {
+              resolve(null);
+              return;
+            }
+            file.text().then(resolve, reject);
+          });
+          input.click();
+        });
+      },
     };
   }
 
