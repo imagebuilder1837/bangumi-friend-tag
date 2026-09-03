@@ -677,14 +677,6 @@
     return { mode, page };
   }
 
-  function warnStorageFallback() {
-    if (typeof console !== "undefined") {
-      console.warn?.(
-        "bangumi-friend-tag: GM_getValue/GM_setValue 不可用，标签数据不会持久化。",
-      );
-    }
-  }
-
   // 浏览器（用户脚本或组件）中的缺省依赖来源。仅在文件尾部的浏览器分支
   // 调用；typeof 守卫使其在任何全局环境下都不会抛出 ReferenceError。
   function globalDependencies() {
