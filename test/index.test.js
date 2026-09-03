@@ -101,20 +101,12 @@ class StubElement {
 
   querySelector(selector) {
     this.#record("querySelector", { tagName: this.tagName, selector });
-    const parsed = parseCompound(selector);
-    if (matchesSelector(this, parsed)) return this;
-    for (const node of walkElements(this)) {
-      if (matchesSelector(node, parsed)) return node;
-    }
-    return null;
+    return queryWithin(this, selector, () => {});
   }
 
   querySelectorAll(selector) {
     this.#record("querySelectorAll", { tagName: this.tagName, selector });
-    const parsed = parseCompound(selector);
-    return [...walkElements(this)].filter((node) =>
-      matchesSelector(node, parsed)
-    );
+    return queryAllWithin(this, selector, () => {});
   }
 }
 
@@ -187,6 +179,26 @@ function* walkElements(node) {
   }
 }
 
+// Element 与 Document 桩共用的查询遍历：先尝试作用域自身，再深度
+// 遍历后代。record 接收 selector，由调用方决定记录形态。
+function queryWithin(scope, selector, record) {
+  record(selector);
+  const parsed = parseCompound(selector);
+  if (matchesSelector(scope, parsed)) return scope;
+  for (const node of walkElements(scope)) {
+    if (matchesSelector(node, parsed)) return node;
+  }
+  return null;
+}
+
+function queryAllWithin(scope, selector, record) {
+  record(selector);
+  const parsed = parseCompound(selector);
+  return [...walkElements(scope)].filter((node) =>
+    matchesSelector(node, parsed)
+  );
+}
+
 // 从已解析的子树根构造 document 桩（供 fixture 与手工构造树共用）。
 function documentFromTree(root) {
   const mutations = [];
@@ -202,19 +214,11 @@ function documentFromTree(root) {
     },
     querySelector(selector) {
       record("querySelector", { selector });
-      const parsed = parseCompound(selector);
-      if (matchesSelector(root, parsed)) return root;
-      for (const node of walkElements(root)) {
-        if (matchesSelector(node, parsed)) return node;
-      }
-      return null;
+      return queryWithin(root, selector, () => {});
     },
     querySelectorAll(selector) {
       record("querySelectorAll", { selector });
-      const parsed = parseCompound(selector);
-      return [...walkElements(root)].filter((node) =>
-        matchesSelector(node, parsed)
-      );
+      return queryAllWithin(root, selector, () => {});
     },
   };
   return { document, mutations };

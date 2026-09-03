@@ -47,18 +47,24 @@
     return null;
   }
 
+  // 统一百分号解码失败策略：解码失败返回 null，宁可跳过该条目，也不
+  // 让同一好友因编码差异在不同页面落到不同的存储键。
+  function decodeURIComponentOrNull(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return null;
+    }
+  }
+
   // 从 location 解析页面类型；非好友/反向好友页返回 null。组件模式的
   // @match 语义宽于油猴标准（见 docs/bangumi/cloud-settings.md），不能只
   // 靠匹配规则保证页面归属，需要在运行时二次判定。
   function parsePageType(pathname) {
     const match = PAGE_PATH_PATTERN.exec(pathname ?? "");
     if (!match) return null;
-    let ownerIdentifier;
-    try {
-      ownerIdentifier = decodeURIComponent(match[1]);
-    } catch {
-      return null;
-    }
+    const ownerIdentifier = decodeURIComponentOrNull(match[1]);
+    if (ownerIdentifier === null) return null;
     return { section: match[2], ownerIdentifier };
   }
 
@@ -288,19 +294,14 @@
   }
 
   // 从 /user/{标识} 形式的链接解析用户标识；无法解析（含百分号解码
-  // 失败）时返回 null，与 parsePageType 的策略一致：宁可跳过该条目，
-  // 也不让同一好友因编码差异在不同页面落到不同的存储键。
+  // 失败，策略同 decodeURIComponentOrNull）时返回 null。
   // 允许绝对 URL（页面右上角 idBadgerNeue 的头像链接带站内绝对地址）。
   function parseUserHref(href) {
     const match = /^(?:[a-z][a-z0-9+.-]*:\/\/[^/]+)?\/user\/([^/?#]+)/.exec(
       href ?? "",
     );
     if (!match) return null;
-    try {
-      return decodeURIComponent(match[1]);
-    } catch {
-      return null;
-    }
+    return decodeURIComponentOrNull(match[1]);
   }
 
   // 从页面右上角 idBadgerNeue 的头像链接识别登录账号的用户标识。
