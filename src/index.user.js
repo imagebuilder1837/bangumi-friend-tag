@@ -203,7 +203,13 @@
       try {
         // update 合并写入指定键；save() 手动触发保存（未加入个性化
         // 面板时无自动保存），无回调、不等待、不依赖成功确认。
-        cloudSettings.update?.({ [CLOUD_SETTINGS_KEY]: all });
+        // cloud_settings.save() ultimately serializes nested objects as form
+        // fields. An empty mapping would therefore become an empty request
+        // body and leave the previous cloud value untouched. Encode the
+        // single mapping explicitly so `{}` remains a real value on the wire.
+        cloudSettings.update?.({
+          [CLOUD_SETTINGS_KEY]: JSON.stringify(all),
+        });
         cloudSettings.save?.();
       } catch {
         // 云端写入失败无从感知：本地缓存已是最新，下次启动以缓存优先。

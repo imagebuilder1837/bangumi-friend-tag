@@ -10,5 +10,5 @@
 
 ## Consequences
 
-- localStorage 键与 cloud_settings 键内的映射结构必须保持一致，演进 schema 时需同时迁移两处。
+- localStorage 与 cloud_settings 保存的好友标签映射必须保持相同的逻辑结构；组件模式可将云端单键编码为 JSON 字符串，以避免空对象在平台表单序列化时变成空请求。演进 schema 时需同时迁移两处。
 - 若合并期间检测到本地有待写编辑，需在合并后调用 `update + save` 回写云端，否则编辑会随下次刷新丢失。

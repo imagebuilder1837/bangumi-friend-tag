@@ -607,6 +607,11 @@ function cachedTags(page) {
   return raw === null ? null : JSON.parse(raw);
 }
 
+function cloudTags(page) {
+  const raw = page.cloud.data[CLOUD_KEY];
+  return typeof raw === "string" ? JSON.parse(raw) : raw;
+}
+
 function tagLinkFor(root, href) {
   const container = containerWithAvatarHref(root, href);
   return tagLinks(root).find((link) =>
@@ -1482,7 +1487,7 @@ test("导入即终态：迟到的云端数据不得污染导入结果（文件�
   );
   // 导入数据已推上云端（replaceAll 整张写穿触发 update + save）。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[CLOUD_KEY], { puson_pp: ["导入值"] });
+  assert.equal(lastUpdate[CLOUD_KEY], JSON.stringify({ puson_pp: ["导入值"] }));
 });
 
 test("导入空映射覆盖为空：无缓存组件模式下也写穿云端并置终态", async () => {
@@ -1499,7 +1504,7 @@ test("导入空映射覆盖为空：无缓存组件模式下也写穿云端并�
 
   // 导入数据已写穿云端：云端映射变为空。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[CLOUD_KEY], {});
+  assert.equal(lastUpdate[CLOUD_KEY], "{}");
   assert.ok(page.cloud.calls.save > 0, "导入空映射也应触发 save");
 
   // 迟到的云端旧数据不得重新出现（导入即终态）。
@@ -1575,7 +1580,7 @@ test("组件模式首次加载：有缓存时先按缓存渲染，云端到达�
   );
   // 合并产生变更 → 回写云端 + 缓存同步为合并结果。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[CLOUD_KEY], { puson_pp: ["新"] });
+  assert.equal(lastUpdate[CLOUD_KEY], JSON.stringify({ puson_pp: ["新"] }));
   assert.deepEqual(cachedTags(page), { puson_pp: ["新"] });
 });
 
@@ -1604,7 +1609,7 @@ test("合并方向：本地编辑过的用户标识保留本地值，其余以�
   });
   // 合并产生变更 → 回写云端（update + save）。
   const lastUpdate = page.cloud.calls.update.at(-1);
-  assert.deepEqual(lastUpdate[CLOUD_KEY], merged);
+  assert.equal(lastUpdate[CLOUD_KEY], JSON.stringify(merged));
   assert.ok(page.cloud.calls.save >= 2, "编辑与合并回写各触发一次 save");
 });
 
@@ -1626,7 +1631,7 @@ test("合并期间存在本地编辑时，即使云端只含 edited 条目也回
   // 本地保留编辑值，且合并后回写云端。
   assert.deepEqual(cachedTags(page), { puson_pp: ["本地新值"] });
   assert.ok(page.cloud.calls.save > savesAfterEdit, "合并后应有第二次 save");
-  assert.deepEqual(page.cloud.data[CLOUD_KEY], { puson_pp: ["本地新值"] });
+  assert.deepEqual(cloudTags(page), { puson_pp: ["本地新值"] });
 });
 
 test("编辑标签后：update + save 写入云端，localStorage 缓存与云端数据结构一致", async () => {
@@ -1637,13 +1642,10 @@ test("编辑标签后：update + save 写入云端，localStorage 缓存与云�
   clickTag(tagLinkFor(page.root, "/user/puson_pp"));
 
   assert.deepEqual(page.cloud.calls.update, [
-    { [CLOUD_KEY]: { puson_pp: ["动画", "监督"] } },
+    { [CLOUD_KEY]: JSON.stringify({ puson_pp: ["动画", "监督"] }) },
   ]);
   assert.equal(page.cloud.calls.save, 1);
-  assert.deepEqual(
-    cachedTags(page),
-    page.cloud.data[CLOUD_KEY]
-  );
+  assert.deepEqual(cachedTags(page), cloudTags(page));
 });
 
 test("编辑为空时清除该好友全部标签：云端映射中删除该键", async () => {
@@ -1656,9 +1658,30 @@ test("编辑为空时清除该好友全部标签：云端映射中删除该键",
   clickTag(tagLinkFor(page.root, "/user/puson_pp"));
   await page.flush();
 
-  assert.deepEqual(page.cloud.data[CLOUD_KEY], {});
+  assert.deepEqual(cloudTags(page), {});
   assert.deepEqual(cachedTags(page), {});
   assert.deepEqual(tagListItems(page.root), []);
+});
+
+test("清空最后一个标签：云端单键以 JSON 字符串写入并可在刷新后保持为空", async () => {
+  const page = makeComponentPage("friends_logged.html", {
+    cloudData: { puson_pp: ["旧"] },
+  });
+  await page.flush();
+
+  page.dialog.prompt = () => "   ";
+  clickTag(tagLinkFor(page.root, "/user/puson_pp"));
+  await page.flush();
+
+  assert.equal(page.cloud.calls.update.at(-1)[CLOUD_KEY], "{}");
+
+  const reloaded = makeComponentPage("friends_logged.html", {
+    cloudData: page.cloud.data[CLOUD_KEY],
+    cacheData: { puson_pp: ["旧"] },
+  });
+  await reloaded.flush();
+  assert.deepEqual(cachedTags(reloaded), {});
+  assert.deepEqual(tagListItems(reloaded.root), []);
 });
 
 test("云端读取抛错时跳过合并：本地数据保留、不回写、不抛错", async () => {
