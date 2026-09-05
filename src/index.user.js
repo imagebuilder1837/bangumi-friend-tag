@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bangumi 好友标签
 // @namespace    https://github.com/imagebuilder1837/bangumi-friend-tag
-// @version      0.1.0
+// @version      0.1.1
 // @description  让好友/反向好友页能够添加并管理好友标签。
 // @author       imagebuilder1837
 // @match        https://bgm.tv/user/*/friends
