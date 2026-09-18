@@ -1152,6 +1152,32 @@ test("标题行内右对齐 chiiBtn 重置，底对齐贴住灰线；下方 chii
   assert.equal(chiiButtonByLabel(page.root, "导入标签") !== null, true);
 });
 
+test("反向好友页的标签栏标题显示为「反向好友的标签」", () => {
+  const page = makeUserscriptPage("rev_friends_logged.html", {
+    pathname: "/user/sai/rev_friends",
+  });
+
+  const heading = [...walkElements(tagPanel(page.root))].find(
+    (node) => node.tagName === "h2"
+  );
+  assert.equal(heading.children[0], "反向好友的标签");
+});
+
+test("组件模式按页面类型显示标签栏标题", () => {
+  const friendsPage = makeComponentPage("friends.html", {
+    pathname: "/user/sai/friends",
+  });
+  const reverseFriendsPage = makeComponentPage("rev_friends.html", {
+    pathname: "/user/sai/rev_friends",
+  });
+  const headingText = (page) =>
+    [...walkElements(tagPanel(page.root))].find((node) => node.tagName === "h2")
+      .children[0];
+
+  assert.equal(headingText(friendsPage), "好友的标签");
+  assert.equal(headingText(reverseFriendsPage), "反向好友的标签");
+});
+
 test("面板渲染标签与计数、按数量降序、计数右对齐结构复刻站内 tagList", () => {
   const page = makeUserscriptPage("friends_logged.html", {
     pathname: "/user/sai/friends",

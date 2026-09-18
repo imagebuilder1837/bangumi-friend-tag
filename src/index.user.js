@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bangumi 好友标签
 // @namespace    https://github.com/imagebuilder1837/bangumi-friend-tag
-// @version      0.1.1
+// @version      0.1.2
 // @description  让好友/反向好友页能够添加并管理好友标签。
 // @author       imagebuilder1837
 // @match        https://bgm.tv/user/*/friends
@@ -421,13 +421,20 @@
     return button;
   }
 
-  // 「好友的标签」栏：复刻条目页 SimpleSidePanel（标题 + tagList，计数
+  // 「好友标签」栏：复刻条目页 SimpleSidePanel（标题 + tagList，计数
   // 复用站内 .tagList li a small 的右对齐浮动，见「我看过的动画」页
   // userTagList 的原始标记）。插入 .columns 内 columnUserSingle 之后的
   // 新右栏；空状态用站内 tip 风格「暂无标签」，标题与三个按钮常驻。
   // 筛选为单选，通过直接切换好友项可见性实现（不走 URL）；对数千好友
   // 项只做属性写入、不读取任何布局信息，避免逐项强制同步布局。
-  function createTagPanel({ document, store, dialog, entries, files }) {
+  function createTagPanel({
+    document,
+    store,
+    dialog,
+    entries,
+    files,
+    section,
+  }) {
     const columns = document.querySelector(".columns");
     if (!columns) return { refresh() {} };
     installPanelStyles(document);
@@ -452,7 +459,8 @@
       "display:flex;align-items:flex-end;justify-content:space-between;",
     );
     const resetButton = createChiiButton(document, "重置", "rr");
-    heading.append(document.createTextNode("好友的标签"), resetButton);
+    const title = section === "rev_friends" ? "反向好友的标签" : "好友的标签";
+    heading.append(document.createTextNode(title), resetButton);
 
     const listHolder = document.createElement("div");
     const emptyTip = document.createElement("div");
@@ -694,6 +702,7 @@
       dialog: deps.dialog,
       entries,
       files: deps.files ?? defaultFiles(),
+      section: page.section,
     });
     installTagButtons({
       document: deps.document,
