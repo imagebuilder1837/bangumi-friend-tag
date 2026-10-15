@@ -32,4 +32,4 @@ Issues 跟踪在本仓库的 GitHub Issues（`gh` CLI）；agent 默认禁止任
 
 ### Domain docs
 
-Single-context 布局：根目录 `CONTEXT.md` + `docs/adr/`。See `docs/agents/domain.md`.
+Single-context 布局：根目录 `GLOSSARY.md` + `docs/adr/`。See `docs/agents/domain.md`.

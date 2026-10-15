@@ -27,7 +27,7 @@
   });
 
   // 页面路径形如 /user/{标识}/friends 或 /user/{标识}/rev_friends，
-  // 标识为数字或字符串（见 CONTEXT.md「用户标识」）。
+  // 标识为数字或字符串（见 GLOSSARY.md「用户标识」）。
   const PAGE_PATH_PATTERN = /^\/user\/([^/]+)\/(friends|rev_friends)\/?$/;
 
   // 组件模式（ADR-0001，适用范围经 ADR-0003 收窄）：整张映射存放在
